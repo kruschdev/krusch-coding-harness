@@ -106,7 +106,7 @@ flowchart TD
 
 ---
 
-## 📊 Empirical Benchmarks (`68/68` Clean-Room SHA-256 Gates)
+## 📊 Empirical Benchmarks (`73/73` Clean-Room SHA-256 Gates)
 
 All raw per-query/per-episode audit logs and `SHA-256` provenance digests are published openly on Hugging Face at [**`krush420/sovereign-g4-benchmarks`**](https://huggingface.co/datasets/krush420/sovereign-g4-benchmarks) and interactively at [**`krush420/sovereign-router-arena`**](https://huggingface.co/spaces/krush420/sovereign-router-arena).
 
