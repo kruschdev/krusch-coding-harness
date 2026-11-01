@@ -12,8 +12,57 @@ dotenv.config({ path: path.resolve(__dirname, '..', '.env'), quiet: true });
 const DEFAULT_DATABASE_URL = 'postgresql://postgres:postgres@localhost:5432/krusch';
 const connectionString = process.env.DATABASE_URL || DEFAULT_DATABASE_URL;
 
+const pgBrickUrl = new URL('../../../lib/pg.js', import.meta.url);
+const pgBrickSpec = '@krusch/toolkit/pg';
+
+let createPgPool = null;
+if (fs.existsSync(pgBrickUrl)) {
+  try {
+    ({ createPgPool } = await import(pgBrickUrl.href));
+  } catch {
+    createPgPool = null;
+  }
+}
+if (!createPgPool) {
+  try {
+    ({ createPgPool } = await import(pgBrickSpec));
+  } catch {
+    createPgPool = null;
+  }
+}
+
+const migratePoolLogger = {
+  info() {},
+  debug() {},
+  warn() {},
+  error(_msg, err) {
+    const detail = err?.error?.message || err?.message || String(err || '');
+    console.error('[krusch:migrate] PostgreSQL pool idle client error:', detail);
+  },
+};
+
+function createMigrationPool(connStr) {
+  if (typeof createPgPool === 'function') {
+    return createPgPool(
+      { connectionString: connStr },
+      {
+        serviceName: 'krusch-migrate',
+        connectionTimeoutMillis: 5000,
+        PoolClass: pg.Pool,
+        logger: migratePoolLogger,
+      }
+    ).pool;
+  }
+  const PoolCtor = pg.Pool;
+  const fallbackPool = new PoolCtor({ connectionString: connStr, connectionTimeoutMillis: 5000 });
+  fallbackPool.on?.('error', (err) => {
+    console.error('[krusch:migrate] PostgreSQL pool idle client error:', err.message);
+  });
+  return fallbackPool;
+}
+
 export async function migrate() {
-  const pool = new pg.Pool({ connectionString, connectionTimeoutMillis: 5000 });
+  const pool = createMigrationPool(connectionString);
   let client;
   try {
     client = await pool.connect();

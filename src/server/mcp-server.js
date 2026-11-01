@@ -2,10 +2,7 @@ import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
   ErrorCode,
   McpError
 } from '@modelcontextprotocol/sdk/types.js';
@@ -15,230 +12,233 @@ import { KruschStateManager } from '../brain/state-manager.js';
 import { KruschFSM, HARNESS_PHASES } from '../workflow/fsm.js';
 import { query, pool } from '../brain/pool.js';
 
-/**
- * Factory function creating and configuring the Krusch MCP Server instance.
- * Allows in-memory testing without spawning stdio child processes.
- */
-export function createMcpServer(options = {}) {
-  const shutdownTimeoutMs = Number(options.shutdownTimeoutMs ?? 30_000);
-  const maxActiveTasks = Math.max(1, Number(options.maxActiveTasks ?? 10_000));
-  const server = new Server(
-    { name: 'krusch-harness', version: '0.1.0' },
-    { capabilities: { tools: {} } }
-  );
+const HARNESS_VERSION = '0.1.0';
+const mcpBrickUrl = new URL('../../../../lib/mcp-server.js', import.meta.url);
+const mcpBrickSpec = '@krusch/toolkit/mcp';
 
-  const activeTasks = new Map();
-  let isClosing = false;
-  let closingPromise = null;
+let defineMcpTool = null;
+let registerMcpHandlers = null;
+let connectToolkitMcpServer = null;
 
-  server.registerTask = (id, taskPromise) => {
-    const taskKey = String(id || '').trim();
-    if (!taskKey) {
-      throw new McpError(ErrorCode.InvalidParams, 'Task ID must be a non-empty string');
-    }
-    if (isClosing) {
-      throw new McpError(ErrorCode.InternalError, 'Cannot register task: MCP server is shutting down');
-    }
-    if (activeTasks.size >= maxActiveTasks) {
-      throw new McpError(
-        ErrorCode.InternalError,
-        `Maximum active task limit reached (${maxActiveTasks})`
-      );
-    }
-    if (activeTasks.has(taskKey)) {
-      throw new McpError(
-        ErrorCode.InvalidParams,
-        `Duplicate active task ID: ${taskKey}`
-      );
-    }
-    const tracked = Promise.resolve(taskPromise);
-    if (isClosing) {
-      throw new McpError(ErrorCode.InternalError, 'Cannot register task: MCP server is shutting down');
-    }
-    activeTasks.set(taskKey, tracked);
-    tracked.finally(() => {
-      if (activeTasks.get(taskKey) === tracked) {
-        activeTasks.delete(taskKey);
-      }
+if (fs.existsSync(mcpBrickUrl)) {
+  try {
+    ({
+      defineMcpTool,
+      registerMcpHandlers,
+      createMcpServer: connectToolkitMcpServer,
+    } = await import(mcpBrickUrl.href));
+  } catch {
+    defineMcpTool = null;
+  }
+}
+
+if (!defineMcpTool || !registerMcpHandlers || !connectToolkitMcpServer) {
+  try {
+    ({
+      defineMcpTool,
+      registerMcpHandlers,
+      createMcpServer: connectToolkitMcpServer,
+    } = await import(mcpBrickSpec));
+  } catch {
+    const sdkTypesSpec = '@modelcontextprotocol/sdk/types.js';
+    const { CallToolRequestSchema, ListToolsRequestSchema } = await import(sdkTypesSpec);
+    defineMcpTool = ({
+      name,
+      title,
+      description = '',
+      inputSchema = { type: 'object', properties: {} },
+      annotations = {},
+      readOnlyHint,
+      destructiveHint,
+      idempotentHint,
+      openWorldHint,
+      ...rest
+    } = {}) => ({
+      ...rest,
+      name,
+      description,
+      inputSchema,
+      annotations: {
+        ...annotations,
+        title: String(annotations?.title || title || name),
+        readOnlyHint: Boolean(readOnlyHint ?? annotations?.readOnlyHint ?? true),
+        destructiveHint: Boolean(destructiveHint ?? annotations?.destructiveHint ?? false),
+        idempotentHint: Boolean(idempotentHint ?? annotations?.idempotentHint ?? true),
+        openWorldHint: Boolean(openWorldHint ?? annotations?.openWorldHint ?? false),
+      },
     });
-    return tracked;
-  };
-
-  server.listTasks = () => Array.from(activeTasks.keys());
-
-  const originalClose = server.close.bind(server);
-  server.close = async () => {
-    if (closingPromise) {
-      return closingPromise;
-    }
-    isClosing = true;
-    closingPromise = (async () => {
-      if (activeTasks.size > 0) {
-        let timer = null;
-        const drainSequentially = async () => {
-          while (activeTasks.size > 0) {
-            const snapshot = Array.from(activeTasks.values());
-            await Promise.allSettled(snapshot);
-          }
-        };
+    registerMcpHandlers = (srv, tools = [], toolHandler, opts = {}) => {
+      const normalizedTools = tools.map((tool) => defineMcpTool(tool));
+      srv.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: normalizedTools }));
+      srv.setRequestHandler(CallToolRequestSchema, async (request) => {
+        const toolName = String(request?.params?.name ?? '');
+        const toolArgs = request?.params?.arguments ?? {};
         try {
-          await Promise.race([
-            drainSequentially(),
-            new Promise((_, reject) => {
-              timer = setTimeout(() => reject(new Error('MCP shutdown timeout')), shutdownTimeoutMs);
-            })
-          ]);
+          return await toolHandler(toolName, toolArgs, request);
         } catch (err) {
-          console.warn(
-            `MCP shutdown timed out after ${Math.round(shutdownTimeoutMs / 1000)} s – forcing termination of remaining tasks`
-          );
-        } finally {
-          if (timer) clearTimeout(timer);
+          if (
+            opts.rethrowMcpError === true &&
+            err &&
+            typeof err === 'object' &&
+            (err instanceof McpError ||
+              err.name === 'McpError' ||
+              (typeof err.code === 'number' && err.code <= -32000))
+          ) {
+            throw err;
+          }
+          return {
+            isError: true,
+            content: [{ type: 'text', text: `Krusch Error: ${err?.message || String(err)}` }],
+          };
         }
-      }
-      return originalClose();
-    })();
-    return closingPromise;
-  };
-
-
-  // Invariant #567: All 7 MCP tools must declare readOnlyHint, destructiveHint, idempotentHint, and openWorldHint
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
-    return {
-      tools: [
-        {
-          name: 'krusch_run',
-          description: 'Asynchronously launch an engineering task in the Krusch harness. Returns immediately with taskId for polling.',
-          annotations: {
-            readOnlyHint: false,
-            destructiveHint: false,
-            idempotentHint: false,
-            openWorldHint: true
-          },
-          inputSchema: {
-            type: 'object',
-            properties: {
-              goal: { type: 'string', description: 'Engineering task or objective' },
-              projectPath: { type: 'string', description: 'Working directory path (defaults to current)' },
-              modelOverride: { type: 'string', description: 'Optional model override' },
-              autoApprove: { type: 'boolean', description: 'Whether to auto-apply diffs upon passing verification' },
-              useMock: { type: 'boolean', description: 'Run with local deterministic mock adapter (offline/testing)' }
-            },
-            required: ['goal']
-          }
-        },
-        {
-          name: 'krusch_task_status',
-          description: 'Poll real-time task status, phase transitions, latest verification, and recent events from PostgreSQL.',
-          annotations: {
-            readOnlyHint: true,
-            destructiveHint: false,
-            idempotentHint: true,
-            openWorldHint: false
-          },
-          inputSchema: {
-            type: 'object',
-            properties: {
-              taskId: { type: 'string', description: 'Task ID' }
-            },
-            required: ['taskId']
-          }
-        },
-        {
-          name: 'krusch_diff',
-          description: 'Inspect unified diffs of all staged modifications held in PostgreSQL for review in Krusch Control Plane.',
-          annotations: {
-            readOnlyHint: true,
-            destructiveHint: false,
-            idempotentHint: true,
-            openWorldHint: false
-          },
-          inputSchema: {
-            type: 'object',
-            properties: {
-              taskId: { type: 'string', description: 'Task ID' }
-            },
-            required: ['taskId']
-          }
-        },
-        {
-          name: 'krusch_apply_diff',
-          description: 'Approve and apply verified staged diffs from PostgreSQL to physical disk via 2PC apply journal.',
-          annotations: {
-            readOnlyHint: false,
-            destructiveHint: true,
-            idempotentHint: true,
-            openWorldHint: false
-          },
-          inputSchema: {
-            type: 'object',
-            properties: {
-              taskId: { type: 'string', description: 'Task ID' },
-              diffId: { type: 'integer', description: 'Optional specific diff ID; applies all verified diffs if omitted' }
-            },
-            required: ['taskId']
-          }
-        },
-        {
-          name: 'krusch_explain',
-          description: 'Explain transition feasibility, invariant blockers, and ground-truth verification diagnostics for a task.',
-          annotations: {
-            readOnlyHint: true,
-            destructiveHint: false,
-            idempotentHint: true,
-            openWorldHint: false
-          },
-          inputSchema: {
-            type: 'object',
-            properties: {
-              taskId: { type: 'string', description: 'Task ID' }
-            },
-            required: ['taskId']
-          }
-        },
-        {
-          name: 'krusch_reject',
-          description: 'Reject one or all staged diffs for a task, preventing apply and releasing leases.',
-          annotations: {
-            readOnlyHint: false,
-            destructiveHint: true,
-            idempotentHint: true,
-            openWorldHint: false
-          },
-          inputSchema: {
-            type: 'object',
-            properties: {
-              taskId: { type: 'string', description: 'Task ID' },
-              diffId: { type: 'integer', description: 'Optional specific diff ID to reject' },
-              reason: { type: 'string', description: 'Rationale for rejection' }
-            },
-            required: ['taskId']
-          }
-        },
-        {
-          name: 'krusch_abort',
-          description: 'Explicitly abort an active or waiting task, releasing all file concurrency leases.',
-          annotations: {
-            readOnlyHint: false,
-            destructiveHint: true,
-            idempotentHint: true,
-            openWorldHint: false
-          },
-          inputSchema: {
-            type: 'object',
-            properties: {
-              taskId: { type: 'string', description: 'Task ID' },
-              reason: { type: 'string', description: 'Rationale for aborting' }
-            },
-            required: ['taskId']
-          }
-        }
-      ]
+      });
+      return { server: srv, normalizedTools };
     };
-  });
+    connectToolkitMcpServer = async (name, version, tools = [], toolHandler, opts = {}) => {
+      const srv = opts.server || new Server({ name, version }, { capabilities: { tools: {} } });
+      registerMcpHandlers(srv, tools, toolHandler, opts);
+      const stdioSpec = '@modelcontextprotocol/sdk/server/' + 'stdio.js';
+      const transport = opts.transport || new (await import(stdioSpec)).StdioServerTransport();
+      await srv.connect(transport);
+      return srv;
+    };
+  }
+}
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const { name, arguments: args = {} } = request.params;
+// Invariant #567: All 7 MCP tools must declare readOnlyHint, destructiveHint, idempotentHint, and openWorldHint
+const HARNESS_TOOLS = [
+  defineMcpTool({
+    name: 'krusch_run',
+    description: 'Asynchronously launch an engineering task in the Krusch harness. Returns immediately with taskId for polling.',
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        goal: { type: 'string', description: 'Engineering task or objective' },
+        projectPath: { type: 'string', description: 'Working directory path (defaults to current)' },
+        modelOverride: { type: 'string', description: 'Optional model override' },
+        autoApprove: { type: 'boolean', description: 'Whether to auto-apply diffs upon passing verification' },
+        useMock: { type: 'boolean', description: 'Run with local deterministic mock adapter (offline/testing)' }
+      },
+      required: ['goal']
+    }
+  }),
+  defineMcpTool({
+    name: 'krusch_task_status',
+    description: 'Poll real-time task status, phase transitions, latest verification, and recent events from PostgreSQL.',
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: 'Task ID' }
+      },
+      required: ['taskId']
+    }
+  }),
+  defineMcpTool({
+    name: 'krusch_diff',
+    description: 'Inspect unified diffs of all staged modifications held in PostgreSQL for review in Krusch Control Plane.',
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: 'Task ID' }
+      },
+      required: ['taskId']
+    }
+  }),
+  defineMcpTool({
+    name: 'krusch_apply_diff',
+    description: 'Approve and apply verified staged diffs from PostgreSQL to physical disk via 2PC apply journal.',
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: 'Task ID' },
+        diffId: { type: 'integer', description: 'Optional specific diff ID; applies all verified diffs if omitted' }
+      },
+      required: ['taskId']
+    }
+  }),
+  defineMcpTool({
+    name: 'krusch_explain',
+    description: 'Explain transition feasibility, invariant blockers, and ground-truth verification diagnostics for a task.',
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: 'Task ID' }
+      },
+      required: ['taskId']
+    }
+  }),
+  defineMcpTool({
+    name: 'krusch_reject',
+    description: 'Reject one or all staged diffs for a task, preventing apply and releasing leases.',
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: 'Task ID' },
+        diffId: { type: 'integer', description: 'Optional specific diff ID to reject' },
+        reason: { type: 'string', description: 'Rationale for rejection' }
+      },
+      required: ['taskId']
+    }
+  }),
+  defineMcpTool({
+    name: 'krusch_abort',
+    description: 'Explicitly abort an active or waiting task, releasing all file concurrency leases.',
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: 'Task ID' },
+        reason: { type: 'string', description: 'Rationale for aborting' }
+      },
+      required: ['taskId']
+    }
+  })
+];
+
+function createHarnessToolDispatcher(server) {
+  return async function dispatchHarnessTool(name, rawArgs = {}) {
+    const args = rawArgs && typeof rawArgs === 'object' ? rawArgs : {};
 
     try {
       if (name === 'krusch_run') {
@@ -301,7 +301,6 @@ export function createMcpServer(options = {}) {
         });
 
         server.registerTask(taskId, taskPromise);
-
 
         return {
           content: [{
@@ -443,7 +442,11 @@ export function createMcpServer(options = {}) {
 
       throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
     } catch (err) {
-      if (err instanceof McpError) {
+      if (
+        err instanceof McpError ||
+        err?.name === 'McpError' ||
+        (typeof err?.code === 'number' && err.code <= -32000)
+      ) {
         throw err;
       }
       return {
@@ -451,6 +454,100 @@ export function createMcpServer(options = {}) {
         content: [{ type: 'text', text: `Krusch Error: ${err.message}` }]
       };
     }
+  };
+}
+
+/**
+ * Factory function creating and configuring the Krusch MCP Server instance.
+ * Allows in-memory testing without spawning stdio child processes.
+ */
+export function createMcpServer(options = {}) {
+  const shutdownTimeoutMs = Number(options.shutdownTimeoutMs ?? 30_000);
+  const maxActiveTasks = Math.max(1, Number(options.maxActiveTasks ?? 10_000));
+  const server = new Server(
+    { name: 'krusch-harness', version: HARNESS_VERSION },
+    { capabilities: { tools: {} } }
+  );
+
+  const activeTasks = new Map();
+  let isClosing = false;
+  let closingPromise = null;
+
+  server.registerTask = (id, taskPromise) => {
+    const taskKey = String(id || '').trim();
+    if (!taskKey) {
+      throw new McpError(ErrorCode.InvalidParams, 'Task ID must be a non-empty string');
+    }
+    if (isClosing) {
+      throw new McpError(ErrorCode.InternalError, 'Cannot register task: MCP server is shutting down');
+    }
+    if (activeTasks.size >= maxActiveTasks) {
+      throw new McpError(
+        ErrorCode.InternalError,
+        `Maximum active task limit reached (${maxActiveTasks})`
+      );
+    }
+    if (activeTasks.has(taskKey)) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `Duplicate active task ID: ${taskKey}`
+      );
+    }
+    const tracked = Promise.resolve(taskPromise);
+    if (isClosing) {
+      throw new McpError(ErrorCode.InternalError, 'Cannot register task: MCP server is shutting down');
+    }
+    activeTasks.set(taskKey, tracked);
+    tracked.finally(() => {
+      if (activeTasks.get(taskKey) === tracked) {
+        activeTasks.delete(taskKey);
+      }
+    });
+    return tracked;
+  };
+
+  server.listTasks = () => Array.from(activeTasks.keys());
+
+  const originalClose = server.close.bind(server);
+  server.close = async () => {
+    if (closingPromise) {
+      return closingPromise;
+    }
+    isClosing = true;
+    closingPromise = (async () => {
+      if (activeTasks.size > 0) {
+        let timer = null;
+        const drainSequentially = async () => {
+          while (activeTasks.size > 0) {
+            const snapshot = Array.from(activeTasks.values());
+            await Promise.allSettled(snapshot);
+          }
+        };
+        try {
+          await Promise.race([
+            drainSequentially(),
+            new Promise((_, reject) => {
+              timer = setTimeout(() => reject(new Error('MCP shutdown timeout')), shutdownTimeoutMs);
+            })
+          ]);
+        } catch (err) {
+          console.warn(
+            `MCP shutdown timed out after ${Math.round(shutdownTimeoutMs / 1000)} s – forcing termination of remaining tasks`
+          );
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+      }
+      return originalClose();
+    })();
+    return closingPromise;
+  };
+
+  const dispatchHarnessTool = createHarnessToolDispatcher(server);
+  registerMcpHandlers(server, HARNESS_TOOLS, dispatchHarnessTool, {
+    validateArgs: false,
+    rethrowMcpError: true,
+    serverName: 'krusch-harness',
   });
 
   return server;
@@ -468,7 +565,7 @@ export function createMcpServer(options = {}) {
  * 6. krusch_reject: Reject staged diffs and release file concurrency leases.
  * 7. krusch_abort: Explicitly abort task and unlock working tree leases.
  */
-export async function startMcpServer() {
+export async function startMcpServer(options = {}) {
   // Startup Crash Recovery & Lease Maintenance for long-lived MCP server
   try {
     const recovered = await KruschStateManager.recoverInFlightApplies();
@@ -483,9 +580,19 @@ export async function startMcpServer() {
     console.error(`[krusch:mcp] Startup recovery warning: ${err.message}`);
   }
 
-  const server = createMcpServer();
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+  const server = createMcpServer(options);
+  await connectToolkitMcpServer(
+    'krusch-harness',
+    HARNESS_VERSION,
+    HARNESS_TOOLS,
+    createHarnessToolDispatcher(server),
+    {
+      server,
+      transport: options.transport,
+      validateArgs: false,
+      rethrowMcpError: true,
+    }
+  );
   console.error('[krusch:mcp] Krusch MCP Server connected over stdio');
 
   const shutdown = async () => {

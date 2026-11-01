@@ -9,6 +9,57 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
+const webhooksBrickUrl = new URL('../../../../lib/webhooks.js', import.meta.url);
+const webhooksBrickSpec = '@krusch/toolkit/webhooks';
+
+let signWebhookHmac = null;
+let verifySlackSignature = null;
+let constantTimeEqual = null;
+
+if (fs.existsSync(webhooksBrickUrl)) {
+  try {
+    ({ signWebhookHmac, verifySlackSignature, constantTimeEqual } = await import(webhooksBrickUrl.href));
+  } catch {
+    signWebhookHmac = null;
+  }
+}
+if (!signWebhookHmac || !verifySlackSignature || !constantTimeEqual) {
+  try {
+    ({ signWebhookHmac, verifySlackSignature, constantTimeEqual } = await import(webhooksBrickSpec));
+  } catch {
+    constantTimeEqual = (a, b) => {
+      const bufA = Buffer.from(String(a ?? ''), 'utf8');
+      const bufB = Buffer.from(String(b ?? ''), 'utf8');
+      if (bufA.length === 0 || bufA.length !== bufB.length) return false;
+      return crypto.timingSafeEqual(bufA, bufB);
+    };
+    signWebhookHmac = (rawBody, secret, { algorithm = 'sha256', prefix = '' } = {}) => {
+      const digest = crypto.createHmac(algorithm, secret).update(String(rawBody ?? ''), 'utf8').digest('hex');
+      return `${prefix}${digest}`;
+    };
+    verifySlackSignature = ({
+      rawBody = '',
+      timestampHeader,
+      signatureHeader,
+      signingSecret,
+      toleranceSeconds = 300,
+      nowSeconds = Math.floor(Date.now() / 1000)
+    } = {}) => {
+      if (typeof signingSecret !== 'string' || signingSecret.trim().length === 0) {
+        return { ok: false };
+      }
+      const ts = Number(timestampHeader);
+      if (!Number.isFinite(ts) || Math.abs(nowSeconds - ts) > toleranceSeconds) {
+        return { ok: false };
+      }
+      const expected = signWebhookHmac(`v0:${timestampHeader}:${rawBody ?? ''}`, signingSecret, {
+        prefix: 'v0='
+      });
+      return { ok: constantTimeEqual(expected, signatureHeader) };
+    };
+  }
+}
+
 /** Default 72-hour approval time-to-live in milliseconds (259,200,000 ms). */
 export const DEFAULT_HITL_TTL_MS = 72 * 60 * 60 * 1000;
 
@@ -21,12 +72,11 @@ export const DEFAULT_HITL_TTL_MS = 72 * 60 * 60 * 1000;
  * @returns {string} Formatted `v0=<hex>` Slack signature
  */
 export function computeSlackSignature(signingSecret, timestampSec, rawBody) {
-  if (typeof signingSecret !== 'string' || signingSecret.length === 0) {
+  if (typeof signingSecret !== 'string' || signingSecret.trim().length === 0) {
     throw new TypeError('signingSecret must be a non-empty string.');
   }
-  const baseString = `v0:${timestampSec}:${rawBody ?? ''}`;
-  const digest = crypto.createHmac('sha256', signingSecret).update(baseString).digest('hex');
-  return `v0=${digest}`;
+  const bodyStr = typeof rawBody === 'string' ? rawBody : String(rawBody ?? '');
+  return signWebhookHmac(`v0:${timestampSec}:${bodyStr}`, signingSecret, { prefix: 'v0=' });
 }
 
 /**
@@ -72,15 +122,25 @@ export function verifySlackWebhookSignature({
     };
   }
 
-  const expected = computeSlackSignature(
-    signingSecret,
-    timestampHeader,
-    typeof rawBody === 'string' ? rawBody : String(rawBody ?? '')
-  );
-  const expectedBuf = Buffer.from(expected, 'utf8');
-  const actualBuf = Buffer.from(signatureHeader, 'utf8');
+  const bodyStr = typeof rawBody === 'string' ? rawBody : String(rawBody ?? '');
+  const expected = computeSlackSignature(signingSecret, timestampHeader, bodyStr);
 
-  if (expectedBuf.length !== actualBuf.length || !crypto.timingSafeEqual(expectedBuf, actualBuf)) {
+  if (/^\d{1,12}$/.test(String(timestampHeader))) {
+    const toolkitCheck = verifySlackSignature({
+      rawBody: bodyStr,
+      timestampHeader: String(timestampHeader),
+      signatureHeader,
+      signingSecret,
+      toleranceSeconds: maxSkewSec,
+      nowSeconds: nowSec
+    });
+    if (!toolkitCheck.ok || !constantTimeEqual(expected, signatureHeader)) {
+      return { valid: false, reason: 'Slack HMAC-SHA256 signature mismatch.' };
+    }
+    return { valid: true, reason: 'Valid Slack HMAC-SHA256 signature.' };
+  }
+
+  if (!constantTimeEqual(expected, signatureHeader)) {
     return { valid: false, reason: 'Slack HMAC-SHA256 signature mismatch.' };
   }
 

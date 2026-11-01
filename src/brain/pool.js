@@ -58,21 +58,65 @@ export async function getPglite() {
   return pgliteInstance;
 }
 
+const pgBrickUrl = new URL('../../../../lib/pg.js', import.meta.url);
+const pgBrickSpec = '@krusch/toolkit/pg';
+
+let createPgPool = null;
+if (fs.existsSync(pgBrickUrl)) {
+  try {
+    ({ createPgPool } = await import(pgBrickUrl.href));
+  } catch {
+    createPgPool = null;
+  }
+}
+if (!createPgPool) {
+  try {
+    ({ createPgPool } = await import(pgBrickSpec));
+  } catch {
+    createPgPool = null;
+  }
+}
+
+const poolLogger = {
+  info() {},
+  debug() {},
+  warn() {},
+  error(_msg, err) {
+    const detail = err?.error?.message || err?.message || String(err || '');
+    console.error('[krusch:db] PostgreSQL pool idle client error:', detail);
+  },
+};
+
 export function getPool() {
   if (ephemeralMode) {
     throw new Error('Cannot get pg.Pool in ephemeral mode. Use query() or withTransaction().');
   }
   if (!activePool || activePool.ending || activePool.ended) {
-    activePool = new pg.Pool({
-      connectionString,
-      max: 10,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 5000,
-    });
-    // Guard against uncaught idle client crashes (e.g. Postgres restart or network drops)
-    activePool.on('error', (err) => {
-      console.error('[krusch:db] PostgreSQL pool idle client error:', err.message);
-    });
+    if (typeof createPgPool === 'function') {
+      activePool = createPgPool(
+        { connectionString },
+        {
+          serviceName: 'krusch-db',
+          max: 10,
+          idleTimeoutMillis: 30000,
+          connectionTimeoutMillis: 5000,
+          PoolClass: pg.Pool,
+          logger: poolLogger,
+        }
+      ).pool;
+    } else {
+      const PoolCtor = pg.Pool;
+      activePool = new PoolCtor({
+        connectionString,
+        max: 10,
+        idleTimeoutMillis: 30000,
+        connectionTimeoutMillis: 5000,
+      });
+      // Guard against uncaught idle client crashes (e.g. Postgres restart or network drops)
+      activePool.on('error', (err) => {
+        console.error('[krusch:db] PostgreSQL pool idle client error:', err.message);
+      });
+    }
   }
   return activePool;
 }
