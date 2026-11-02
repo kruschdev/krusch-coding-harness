@@ -319,7 +319,7 @@ export function renderFactoryControlRoomHtml() {
             <div class="station-eyebrow">STATION 03 · COMPUTE ROUTING (krusch-cascade-router)</div>
             <div class="station-title">Microsecond L1/L2 Ticket Router &amp; Prefix Parity Proof</div>
           </div>
-          <span class="badge">80.72% RouterArena</span>
+          <span class="badge">74.44% RouterArena (0.7263)</span>
         </div>
         <div class="row" style="flex-wrap: nowrap;">
           <input id="route-prompt" value="Modernize legacy authentication module and verify all inbound callers pass unit tests" placeholder="Enter ticket description or SQL/code snippet..." />
