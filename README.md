@@ -106,9 +106,9 @@ flowchart TD
 
 ---
 
-## 📊 Empirical Benchmarks (`73/73` Clean-Room SHA-256 Gates)
+## 📊 Empirical Benchmarks (`75/75` Clean-Room SHA-256 Gates)
 
-All raw per-query/per-episode audit logs and `SHA-256` provenance digests are published openly on Hugging Face at [**`krush420/sovereign-g4-benchmarks`**](https://huggingface.co/datasets/krush420/sovereign-g4-benchmarks) and interactively at [**`krush420/sovereign-router-arena`**](https://huggingface.co/spaces/krush420/sovereign-router-arena).
+All **`40` SHA-256-pinned raw JSON audit logs** (`41` total incl. the `RouteWorks/RouterArena` [PR #169](https://github.com/RouteWorks/RouterArena/pull/169) live receipt bundle) across **`325,000+`** queries/traces and `12` external suites are published openly on Hugging Face at [**`krush420/sovereign-g4-benchmarks`**](https://huggingface.co/datasets/krush420/sovereign-g4-benchmarks) and interactively at [**`krush420/sovereign-router-arena`**](https://huggingface.co/spaces/krush420/sovereign-router-arena).
 
 ### 1. Aider Polyglot (`225 / 225` Multi-Language Coding Tasks)
 
@@ -147,6 +147,18 @@ Evaluated across **all `1,046` official `ethz-spylab/agentdojo` (`v1.2.2`) episo
 | `raw_unprotected_agent` (No Guard) | `61.86%` (`60/97`) | `55.32%` | `19.28%` (`183/949` hijacked) | `80.72%` | `0` |
 | `spotlighting_delimited_only` (`<UNTRUSTED_CONTENT>` Only) | `69.07%` (`67/97`) | `54.58%` | `14.86%` (`141/949` hijacked) | `85.14%` | `0` |
 | **`krusch_sovereign_defense` (`createKruschPolicyFloor` + Taint Guard)** | **`61.86%` (`0.00 pp` loss)** | `49.95%` | **`0.00%` (`0/949` hijacked)** | **`100.00%`** | **`83`** |
+
+### 4. Official DolphinBench V5 & Generalized 2PC Tool-Action Harness (`19` Runs, `11,400` `openai/gpt-5.6-sol` Traces, `6` Families)
+
+Evaluated across **`19` official `600`-task [DolphinBench](https://dolphinbench.ai/) evaluations (`11,400` `openai/gpt-5.6-sol` traces across `6` model families; `19/19` passing `dolphinbench.submission.validate`, `8/8` flagship archives verified & queued on `dolphinbench.ai`; full paper: [Return on Memory](https://krusch.dev/articles/return-on-memory-dolphinbench))**:
+
+| Configuration (`Checkpoint` + `Tool Loop`) | Official `gpt-5.6-sol` Score | Cost | Key Result |
+| :--- | :---: | :---: | :--- |
+| **`#1 Overall` — `Gemini 4 Argon (Low, Std. Harness)`** | **`91.17%` (`547/600`)** | **`$24.54`** | `#1` Overall (`Argon Medium` **`89.17%`** @ `$24.57`) |
+| **Model-Matched — `GPT 5.6 Luna (High, Std. Harness)`** | **`81.33%` (`488/600`)** | **`$1.35`** | **`+10.67 pp` (`+64` tasks) higher & `71.0x` cheaper** than Official `#1` `GPT 5.6 Luna + Mem0` (`70.67%` @ `$96.21`); `Luna (Low, Std. Harness)` = **`76.67%`** (`460/600` @ `$1.10`, **`87.4x` cheaper**; `Luna Oracle@4 = 89.50%`) |
+| **`#1 Open-Weights` — `Google Gemma 4 31B (Stock, Std. Harness)`** | **`54.17%` (`325/600`)** | **`$0.00`** | `#1` Open-Weights (Queued UUID `288671ad-afe0-40a3-93af-b834c9bbd306`) |
+| **`Qwen3-Coder-30B-A3B Wave-4` (`Std. Harness` vs. `+ INV-STACK-10 2PC`)** | **`42.67%` / `42.00%`** | **`$0.00`** | `Std. Harness` = **`256/600`**; `+ INV-STACK-10 2PC` = **`252/600`**, cutting duplicate MCP calls by **`-95.2%` (`42 -> 2`)** and lifting 2-pass **`30B Oracle@2` to `50.33%` (`302/600`)** |
+| **Ensembles (`Oracle@19` Global / `Oracle@11` `$0.00` Open-Weights)** | **`97.00%` / `80.00%`** | **`—` / `$0.00`** | **`Oracle@19 = 97.00%` (`582/600`, `<= 3.00%` retrieval miss)** · **`$0.00` Open-Weights `Oracle@11 = 80.00%` (`480/600`)** |
 
 ---
 
