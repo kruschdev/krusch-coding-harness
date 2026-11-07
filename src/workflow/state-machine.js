@@ -14,13 +14,13 @@ function getPhaseObjective(phase, verificationCommand) {
     case HARNESS_PHASES.PLAN:
       return `[ACTIVE HARNESS PHASE: PLAN]
 Phase Objective: Read-only repository discovery and mapping.
-- Inspect relevant files with 'read_file' and locate symbols with 'search_symbols'.
+- Inspect relevant files with 'read_file', explore directories with 'list_dir', and locate symbols with 'search_symbols'.
 - Propose a concrete implementation plan, then call 'finish_plan' when ready to proceed.
-- Invariant Rule: Tool 'stage_diff' is strictly withheld in PLAN. Do not attempt disk mutations.`;
+- Invariant Rule: Tools 'edit_file' and 'stage_diff' are strictly withheld in PLAN. Do not attempt disk mutations.`;
     case HARNESS_PHASES.IMPLEMENT:
       return `[ACTIVE HARNESS PHASE: IMPLEMENT]
 Phase Objective: Code modification and staging.
-- Stage atomic file updates directly into PostgreSQL ACID substrate using 'stage_diff'.
+- Stage targeted file edits into PostgreSQL ACID substrate using 'edit_file' (preferred for existing files) or 'stage_diff' (for new/small files).
 - Call 'request_verification' when all necessary files are staged to proceed to testing.
 - Invariant Rule: All staged diffs are stored in PostgreSQL; disk writes remain strictly blocked until verification passes.`;
     case HARNESS_PHASES.VERIFY:
@@ -36,6 +36,46 @@ Phase Objective: Human-in-the-loop inspection and disk commit.
     default:
       return `[ACTIVE HARNESS PHASE: ${phase}]`;
   }
+}
+
+/**
+ * Compact older tool outputs and bulky stage_diff payloads in conversation history
+ * so multi-turn debugging stays within 16K local model context windows.
+ */
+export function compactTurnMessages(messages, keepRecentMessages = 6, maxOldChars = 1200) {
+  const cutoff = Math.max(1, messages.length - keepRecentMessages);
+  return messages.map((msg, idx) => {
+    if (idx === 0 || idx >= cutoff) {
+      return msg;
+    }
+    if (msg.role === 'tool' && typeof msg.content === 'string' && msg.content.length > maxOldChars) {
+      return {
+        ...msg,
+        content: `${msg.content.slice(0, maxOldChars)}\n...[compacted ${msg.content.length - maxOldChars} chars from earlier turn]`
+      };
+    }
+    if (msg.role === 'assistant' && Array.isArray(msg.tool_calls)) {
+      const compactedCalls = msg.tool_calls.map(tc => {
+        if (tc.function?.name === 'stage_diff' && typeof tc.function?.arguments === 'string' && tc.function.arguments.length > maxOldChars) {
+          try {
+            const parsed = JSON.parse(tc.function.arguments);
+            if (typeof parsed.content === 'string' && parsed.content.length > 600) {
+              parsed.content = `${parsed.content.slice(0, 400)}\n...[compacted ${parsed.content.length - 400} chars of staged file content]`;
+              return {
+                ...tc,
+                function: { ...tc.function, arguments: JSON.stringify(parsed) }
+              };
+            }
+          } catch (_err) {
+            // Preserve original arguments if JSON parsing fails
+          }
+        }
+        return tc;
+      });
+      return { ...msg, tool_calls: compactedCalls };
+    }
+    return msg;
+  });
 }
 
 export class KruschStateMachine {
@@ -195,15 +235,16 @@ ${contextPromptBlock}
 
 Operating Workflow Rules:
 1. Phase-Scoped Tool Discipline: Each turn operates within an explicit FSM phase with designated tools.
-2. In PLAN phase: Inspect and read relevant files before modifying (use token-bounded 'read_file' and 'search_symbols'). Call 'finish_plan' when ready to proceed.
-3. In IMPLEMENT phase: Use 'stage_diff' to propose modifications into PostgreSQL ACID storage. Call 'request_verification' when staging is complete.
+2. In PLAN phase: Inspect and read relevant files before modifying (use token-bounded 'read_file', 'list_dir', and 'search_symbols'). Call 'finish_plan' when ready to proceed.
+3. In IMPLEMENT phase: Use 'edit_file' (preferred for existing files) or 'stage_diff' to propose modifications into PostgreSQL ACID storage. Call 'request_verification' when staging is complete.
 4. In VERIFY phase: Use 'run_command' to run existing tests or verify syntax.
 5. In APPROVAL_GATE phase: Apply staged diffs to disk via 'apply_staged_diff' once verified.`;
 
-      // System message is always at index 0 and updated with active phase directive
+      // System message is always at index 0 and updated with active phase directive; compact older turns
+      const compactedHistory = compactTurnMessages(messages);
       const turnMessages = [
         { role: 'system', content: dynamicSystemPrompt },
-        ...messages
+        ...compactedHistory
       ];
 
       // Execute Model Turn with phase-scoped tools
@@ -248,15 +289,18 @@ Operating Workflow Rules:
       }
 
       // Add assistant response to context
-      messages.push({
+      const assistantMessage = {
         role: 'assistant',
-        content: turnResult.text || '',
-        tool_calls: turnResult.toolCalls.map(tc => ({
+        content: turnResult.text || ''
+      };
+      if (turnResult.toolCalls.length > 0) {
+        assistantMessage.tool_calls = turnResult.toolCalls.map(tc => ({
           id: tc.id,
           type: 'function',
           function: { name: tc.name, arguments: JSON.stringify(tc.args) }
-        }))
-      });
+        }));
+      }
+      messages.push(assistantMessage);
 
       let planFinishedSignal = false;
       let verificationRequested = false;
@@ -264,7 +308,7 @@ Operating Workflow Rules:
 
       // Execute Tool Invocations
       for (const toolCall of turnResult.toolCalls) {
-        if (toolCall.name === 'read_file' || toolCall.name === 'search_symbols') {
+        if (toolCall.name === 'read_file' || toolCall.name === 'list_dir' || toolCall.name === 'search_symbols') {
           if (fsm.currentPhase === HARNESS_PHASES.PLAN) {
             hasReadInPlan = true;
           }
@@ -272,7 +316,7 @@ Operating Workflow Rules:
         if (toolCall.name === 'finish_plan') {
           planFinishedSignal = true;
         }
-        if (toolCall.name === 'stage_diff') {
+        if (toolCall.name === 'stage_diff' || toolCall.name === 'edit_file') {
           stagedInThisTurn = true;
         }
         if (toolCall.name === 'request_verification') {
@@ -355,6 +399,7 @@ Operating Workflow Rules:
       // ─── Post-Turn State-Evidence Evaluation ───
       const pendingDiffs = await KruschStateManager.getPendingDiffs(task.id);
       const latestRun = await KruschStateManager.getLatestVerificationRun(task.id);
+      let pushedUserReply = false;
 
       if (fsm.currentPhase === HARNESS_PHASES.PLAN) {
         if (planFinishedSignal) {
@@ -397,7 +442,7 @@ Operating Workflow Rules:
             console.log(`[krusch:fsm] Auto-applied ${batchResult.appliedCount} staged diff(s) to physical disk. Task COMMITTED.`);
           }
           break;
-        } else if (latestRun && !latestRun.passed) {
+        } else if (latestRun && !latestRun.passed && turnResult.toolCalls.some(tc => tc.name === 'run_command')) {
           verifyFailureRevisits++;
           if (verifyFailureRevisits >= maxPhaseRevisits) {
             const abortReason = `Exceeded maximum verification retry budget (${maxPhaseRevisits} revisits). Aborting task to prevent oscillation.`;
@@ -444,8 +489,17 @@ Operating Workflow Rules:
               role: 'user',
               content: stopCheck.correctivePrompt
             });
+            pushedUserReply = true;
           }
         }
+      }
+
+      // Preserve strict user/assistant role alternation when a turn had no tool calls
+      if (turnResult.toolCalls.length === 0 && !pushedUserReply) {
+        messages.push({
+          role: 'user',
+          content: `Proceed with phase ${fsm.currentPhase} by invoking the appropriate tool (${activeToolDefs.map(t => t.name).join(', ')}).`
+        });
       }
     }
 

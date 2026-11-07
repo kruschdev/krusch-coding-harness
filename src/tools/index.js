@@ -32,8 +32,33 @@ export class KruschTools {
         }
       },
       {
+        name: 'list_dir',
+        description: 'List files and subdirectories inside a repository directory path.',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Relative directory path (default ".")' }
+          },
+          required: []
+        }
+      },
+      {
+        name: 'edit_file',
+        description: 'Stage a targeted string replacement in an existing file into PostgreSQL without re-sending the entire file.',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Relative path to file' },
+            oldString: { type: 'string', description: 'Exact existing substring to replace' },
+            newString: { type: 'string', description: 'Replacement string' },
+            explanation: { type: 'string', description: 'Rationale for the modification' }
+          },
+          required: ['path', 'oldString', 'newString']
+        }
+      },
+      {
         name: 'stage_diff',
-        description: 'Stage an updated file content into PostgreSQL without immediately touching physical disk.',
+        description: 'Stage an updated file content into PostgreSQL without immediately touching physical disk (prefer edit_file for existing files).',
         parameters: {
           type: 'object',
           properties: {
@@ -108,24 +133,24 @@ export class KruschTools {
     switch (phase) {
       case 'PLAN':
         // Discovery & formulation; read-only mapping + explicit plan completion
-        return allDefs.filter(t => ['read_file', 'search_symbols', 'finish_plan'].includes(t.name));
+        return allDefs.filter(t => ['read_file', 'list_dir', 'search_symbols', 'finish_plan'].includes(t.name));
       case 'IMPLEMENT':
         // Active staging into PostgreSQL ACID storage; stage and request verification
-        return allDefs.filter(t => ['read_file', 'search_symbols', 'stage_diff', 'request_verification'].includes(t.name));
+        return allDefs.filter(t => ['read_file', 'list_dir', 'search_symbols', 'edit_file', 'stage_diff', 'request_verification'].includes(t.name));
       case 'VERIFY':
         // Verification testing; run test commands against staged changes; no stage_diff or apply
-        return allDefs.filter(t => ['read_file', 'run_command'].includes(t.name));
+        return allDefs.filter(t => ['read_file', 'list_dir', 'run_command'].includes(t.name));
       case 'APPROVAL_GATE':
-        // Post-verification diff inspection and disk application; no new diffs
-        return allDefs.filter(t => ['read_file', 'apply_staged_diff'].includes(t.name));
+        // Post-verification diff inspection and disk commit; no new diffs
+        return allDefs.filter(t => ['read_file', 'list_dir', 'apply_staged_diff'].includes(t.name));
       default:
         return allDefs;
     }
   }
 
   async executeTool(name, args = {}, options = {}) {
-    // Phase Invariant 1: stage_diff strictly requires explicit IMPLEMENT phase
-    if (name === 'stage_diff') {
+    // Phase Invariant 1: stage_diff / edit_file strictly require explicit IMPLEMENT phase
+    if (name === 'stage_diff' || name === 'edit_file') {
       if (!options.phase || options.phase !== 'IMPLEMENT') {
         return {
           status: 'BLOCKED',
@@ -205,16 +230,70 @@ export class KruschTools {
       };
     }
 
+    if (name === 'list_dir') {
+      const targetRel = typeof args.path === 'string' && args.path.trim() ? args.path.trim() : '.';
+      try {
+        const { projectPath, filePath } = canonicalizePaths(this.projectPath, targetRel);
+        const fullPath = path.resolve(projectPath, filePath);
+        if (!fs.existsSync(fullPath)) {
+          return { error: `Directory not found: ${targetRel}` };
+        }
+        const stat = fs.statSync(fullPath);
+        if (!stat.isDirectory()) {
+          return { error: `Path is a file, not a directory: ${targetRel}. Use read_file instead.` };
+        }
+        const entries = fs.readdirSync(fullPath, { withFileTypes: true })
+          .filter(d => !d.name.startsWith('.git'))
+          .slice(0, 200)
+          .map(d => (d.isDirectory() ? `${d.name}/` : d.name));
+        return { path: filePath, entries, count: entries.length };
+      } catch (err) {
+        return { error: `Failed to list directory ${targetRel}: ${err.message}` };
+      }
+    }
+
     if (name === 'read_file') {
       if (!args.path || typeof args.path !== 'string') {
         return { error: 'Invalid path: file path must be a non-empty string.' };
       }
-      const { projectPath, filePath } = canonicalizePaths(this.projectPath, args.path);
-      const fullPath = path.resolve(projectPath, filePath);
-      if (!fs.existsSync(fullPath)) {
-        return { error: `File not found: ${args.path}` };
+      let projectPath;
+      let filePath;
+      try {
+        ({ projectPath, filePath } = canonicalizePaths(this.projectPath, args.path));
+      } catch (err) {
+        return { error: err.message };
       }
-      const rawContent = fs.readFileSync(fullPath, 'utf-8');
+      const fullPath = path.resolve(projectPath, filePath);
+
+      let stagedOverride = null;
+      try {
+        const pendingDiffs = await KruschStateManager.getPendingDiffs(this.taskId);
+        const matched = pendingDiffs.find(d => d.file_path === filePath);
+        if (matched && typeof matched.staged_content === 'string') {
+          stagedOverride = matched.staged_content;
+        }
+      } catch (_ignore) {
+        // Fallback to disk read if DB query unavailable in standalone unit tests
+      }
+
+      if (stagedOverride === null) {
+        if (!fs.existsSync(fullPath)) {
+          return { error: `File not found: ${args.path}` };
+        }
+        const stat = fs.statSync(fullPath);
+        if (stat.isDirectory()) {
+          const entries = fs.readdirSync(fullPath, { withFileTypes: true })
+            .filter(d => !d.name.startsWith('.git'))
+            .slice(0, 100)
+            .map(d => (d.isDirectory() ? `${d.name}/` : d.name));
+          return {
+            error: `Path '${args.path}' is a directory, not a file. Use list_dir or read one of its files.`,
+            directoryEntries: entries
+          };
+        }
+      }
+
+      const rawContent = stagedOverride !== null ? stagedOverride : fs.readFileSync(fullPath, 'utf-8');
       const lines = rawContent.split('\n');
       const totalLines = lines.length;
 
@@ -238,6 +317,62 @@ export class KruschTools {
       };
     }
 
+    if (name === 'edit_file') {
+      if (!args.path || typeof args.path !== 'string') {
+        return { error: 'Invalid path: file path must be a non-empty string.' };
+      }
+      const oldString = args.oldString ?? args.old_string;
+      const newString = args.newString ?? args.new_string;
+      if (typeof oldString !== 'string' || oldString.length === 0) {
+        return { error: 'Invalid oldString: must be a non-empty string to replace.' };
+      }
+      if (typeof newString !== 'string') {
+        return { error: 'Invalid newString: must be a string.' };
+      }
+
+      const { projectPath, filePath } = canonicalizePaths(this.projectPath, args.path);
+      const fullPath = path.resolve(projectPath, filePath);
+      const diskExists = fs.existsSync(fullPath) && !fs.statSync(fullPath).isDirectory();
+      const originalContent = diskExists ? fs.readFileSync(fullPath, 'utf-8') : '';
+
+      let baseContent = originalContent;
+      try {
+        const pendingDiffs = await KruschStateManager.getPendingDiffs(this.taskId);
+        const matched = pendingDiffs.find(d => d.file_path === filePath);
+        if (matched && typeof matched.staged_content === 'string') {
+          baseContent = matched.staged_content;
+        }
+      } catch (_ignore) {
+        // Fallback to disk content
+      }
+
+      if (!baseContent && !diskExists) {
+        return { error: `File not found: ${args.path}` };
+      }
+      if (!baseContent.includes(oldString)) {
+        return {
+          error: `oldString not found in ${filePath}. Read the target lines with read_file first and pass the exact text (without line number prefixes).`
+        };
+      }
+
+      const updatedContent = baseContent.replace(oldString, () => newString);
+      const stagedRow = await KruschStateManager.stageDiff(this.taskId, {
+        filePath: args.path,
+        projectPath: this.projectPath,
+        originalContent,
+        stagedContent: updatedContent,
+        diffPatch: args.explanation || `Edited ${filePath}`
+      });
+      return {
+        status: 'STAGED',
+        diffId: stagedRow.id,
+        filePath: stagedRow.file_path,
+        hash: stagedRow.sha256_hash,
+        leaseExpiresAt: stagedRow.lease_expires_at,
+        message: `Targeted edit staged in PostgreSQL (ID: ${stagedRow.id}). Call request_verification when ready to test.`
+      };
+    }
+
     if (name === 'stage_diff') {
       if (!args.path || typeof args.path !== 'string') {
         return { error: 'Invalid path: file path must be a non-empty string.' };
@@ -251,7 +386,9 @@ export class KruschTools {
 
       const { projectPath, filePath } = canonicalizePaths(this.projectPath, args.path);
       const fullPath = path.resolve(projectPath, filePath);
-      const originalContent = fs.existsSync(fullPath) ? fs.readFileSync(fullPath, 'utf-8') : '';
+      const originalContent = (fs.existsSync(fullPath) && !fs.statSync(fullPath).isDirectory())
+        ? fs.readFileSync(fullPath, 'utf-8')
+        : '';
       const stagedRow = await KruschStateManager.stageDiff(this.taskId, {
         filePath: args.path,
         projectPath: this.projectPath,

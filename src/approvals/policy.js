@@ -22,14 +22,14 @@ export class KruschApprovalPolicy {
       };
     }
 
-    // 1. Read-only tools are always auto-approved
-    const readOnlyTools = ['read_file', 'search_symbols', 'list_files', 'get_context', 'view_diff'];
+    // 1. Read-only and phase-transition signaling tools are always auto-approved
+    const readOnlyTools = ['read_file', 'search_symbols', 'list_files', 'list_dir', 'get_context', 'view_diff', 'finish_plan', 'request_verification'];
     if (readOnlyTools.includes(toolName)) {
-      return { status: 'AUTO_APPROVED', reason: 'Read-only tool operation.' };
+      return { status: 'AUTO_APPROVED', reason: 'Read-only or phase-transition tool operation.' };
     }
 
     // 2. File mutations staged in PostgreSQL do not touch physical disk yet
-    if (toolName === 'stage_diff') {
+    if (toolName === 'stage_diff' || toolName === 'edit_file') {
       return { status: 'STAGED', reason: 'Mutation staged into PostgreSQL ACID table.' };
     }
 

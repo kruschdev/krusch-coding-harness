@@ -129,6 +129,7 @@ test('Invariant Test (a): PLAN-phase adapter payload contains no apply or stage 
   assert.ok(Array.isArray(capturedTools));
   const capturedNames = capturedTools.map(t => t.name);
   assert.ok(!capturedNames.includes('stage_diff'), 'Adapter payload in PLAN phase cannot receive stage_diff');
+  assert.ok(!capturedNames.includes('edit_file'), 'Adapter payload in PLAN phase cannot receive edit_file');
   assert.ok(!capturedNames.includes('apply_staged_diff'), 'Adapter payload in PLAN phase cannot receive apply_staged_diff');
-  assert.deepStrictEqual(capturedNames, ['read_file', 'search_symbols', 'finish_plan']);
+  assert.deepStrictEqual(capturedNames, ['read_file', 'list_dir', 'search_symbols', 'finish_plan']);
 });
