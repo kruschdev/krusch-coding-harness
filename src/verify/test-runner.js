@@ -113,10 +113,16 @@ export class KruschTestRunner {
 
     const executeOnce = () => new Promise((resolve) => {
       const startTime = Date.now();
-      const parts = command.split(' ');
-      const proc = spawn(parts[0], parts.slice(1), {
+      const argv = [];
+      const tokenRe = /"([^"]*)"|'([^']*)'|(\S+)/g;
+      let match;
+      while ((match = tokenRe.exec(String(command || ''))) !== null) {
+        argv.push(match[1] ?? match[2] ?? match[3]);
+      }
+      const bin = argv[0] || 'true';
+      const proc = spawn(bin, argv.slice(1), {
         cwd,
-        shell: true,
+        shell: false,
         env: { ...process.env, CI: 'true', FORCE_COLOR: '0' }
       });
 
