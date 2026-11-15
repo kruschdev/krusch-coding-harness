@@ -959,6 +959,11 @@ export function startBridgeServer(options = {}) {
     console.log(
       `  - ACID Harness:     /api/harness/run, /api/harness/status, /api/harness/diff, /api/harness/apply, /api/harness/leases`,
     );
+    if (options.recoverOnStartup === true) {
+      KruschStateManager.recoverInFlightApplies().catch((err) => {
+        console.error(`[Krusch Control Plane] Startup recovery warning: ${err.message}`);
+      });
+    }
   });
 
   const cleanup = async () => {

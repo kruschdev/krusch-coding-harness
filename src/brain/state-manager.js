@@ -233,6 +233,19 @@ export function canonicalizePaths(projectPath, filePath) {
   return { projectPath: canonicalProjectPath, filePath: normalizedFilePath };
 }
 
+function parseJournalFiles(rawFiles) {
+  if (Array.isArray(rawFiles)) return rawFiles;
+  if (typeof rawFiles === 'string' && rawFiles.trim()) {
+    try {
+      const parsed = JSON.parse(rawFiles);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
 export class KruschStateManager {
   /**
    * Create a new task in PostgreSQL with resolved verification_command.
@@ -547,24 +560,92 @@ export class KruschStateManager {
     const queryFn = options?.queryFn || query;
     const withTxFn = options?.withTransactionFn || withTransaction;
 
-    let sql = `SELECT * FROM krusch_staged_diffs WHERE status = 'APPLYING' ORDER BY id ASC`;
-    const params = [];
-    if (projectPath) {
-      const canonical = canonicalizePaths(projectPath, '.');
-      sql = `SELECT * FROM krusch_staged_diffs WHERE status = 'APPLYING' AND project_path = $1 ORDER BY id ASC`;
-      params.push(canonical.projectPath);
+    const canonicalFilter = projectPath ? canonicalizePaths(projectPath, '.').projectPath : null;
+    const rawResolved = projectPath ? path.resolve(projectPath).split(path.sep).join('/') : null;
+
+    let journalSql = `SELECT * FROM krusch_apply_journal WHERE state = 'APPLYING' ORDER BY id ASC`;
+    const journalParams = [];
+    if (canonicalFilter) {
+      if (rawResolved && rawResolved !== canonicalFilter) {
+        journalSql = `SELECT * FROM krusch_apply_journal WHERE state = 'APPLYING' AND project_path IN ($1, $2) ORDER BY id ASC`;
+        journalParams.push(canonicalFilter, rawResolved);
+      } else {
+        journalSql = `SELECT * FROM krusch_apply_journal WHERE state = 'APPLYING' AND project_path = $1 ORDER BY id ASC`;
+        journalParams.push(canonicalFilter);
+      }
     }
-    const res = await queryFn(sql, params);
-    if (res.rows.length === 0) return [];
+    const journalRes = await queryFn(journalSql, journalParams);
+
+    let diffSql = `SELECT * FROM krusch_staged_diffs WHERE status = 'APPLYING' ORDER BY id ASC`;
+    const diffParams = [];
+    if (canonicalFilter) {
+      diffSql = `SELECT * FROM krusch_staged_diffs WHERE status = 'APPLYING' AND project_path = $1 ORDER BY id ASC`;
+      diffParams.push(canonicalFilter);
+    }
+    const diffRes = await queryFn(diffSql, diffParams);
+
+    const allDiffs = [...diffRes.rows];
+    const seenDiffIds = new Set(allDiffs.map(d => d.id));
+    const journalEntryByDiffId = new Map();
+    const missingDiffIds = new Set();
+    const journalDiffIdsByRowId = new Map();
+
+    for (const journalRow of journalRes.rows) {
+      const entries = parseJournalFiles(journalRow.files);
+      const rowDiffIds = [];
+      for (const entry of entries) {
+        if (entry && entry.diffId !== undefined && entry.diffId !== null) {
+          const idNum = Number(entry.diffId);
+          if (Number.isInteger(idNum)) {
+            rowDiffIds.push(idNum);
+            journalEntryByDiffId.set(idNum, entry);
+            if (!seenDiffIds.has(idNum)) {
+              missingDiffIds.add(idNum);
+            }
+          }
+        }
+      }
+      journalDiffIdsByRowId.set(journalRow.id, rowDiffIds);
+    }
+
+    if (missingDiffIds.size > 0) {
+      const extraRes = await queryFn(
+        `SELECT * FROM krusch_staged_diffs WHERE id = ANY($1::int[]) ORDER BY id ASC`,
+        [Array.from(missingDiffIds)]
+      );
+      for (const row of extraRes.rows) {
+        if (!seenDiffIds.has(row.id) && ['PENDING', 'APPLYING', 'APPLIED'].includes(row.status)) {
+          seenDiffIds.add(row.id);
+          allDiffs.push(row);
+        }
+      }
+      allDiffs.sort((a, b) => a.id - b.id);
+    }
 
     // Group diffs by task_id to evaluate multi-file batch atomicity
     const taskGroups = new Map();
-    for (const diff of res.rows) {
+    for (const diff of allDiffs) {
       if (!taskGroups.has(diff.task_id)) {
         taskGroups.set(diff.task_id, []);
       }
       taskGroups.get(diff.task_id).push(diff);
     }
+
+    // Close any orphaned active journal row that has zero matching active staged diffs
+    for (const journalRow of journalRes.rows) {
+      const rowDiffIds = journalDiffIdsByRowId.get(journalRow.id) || [];
+      const hasActiveDiffs = rowDiffIds.some(id => seenDiffIds.has(id)) || taskGroups.has(journalRow.task_id);
+      if (!hasActiveDiffs) {
+        await queryFn(
+          `UPDATE krusch_apply_journal
+           SET state = 'ROLLED_BACK', completed_at = NOW(), error_message = COALESCE(error_message, 'Orphaned apply journal with no matching staged diffs')
+           WHERE id = $1 AND state = 'APPLYING'`,
+          [journalRow.id]
+        );
+      }
+    }
+
+    if (taskGroups.size === 0) return [];
 
     const recovered = [];
 
@@ -572,19 +653,37 @@ export class KruschStateManager {
       let inspected;
       try {
         inspected = batchDiffs.map(diff => {
-          const fullPath = path.resolve(diff.project_path, diff.file_path);
+          const journalEntry = journalEntryByDiffId.get(diff.id) || null;
+          const stagedHash = journalEntry?.stagedHash ?? diff.sha256_hash;
+          const originalHash = (journalEntry && 'originalHash' in journalEntry)
+            ? journalEntry.originalHash
+            : diff.original_sha256;
+          const originalContent = (journalEntry && 'originalContent' in journalEntry)
+            ? journalEntry.originalContent
+            : diff.original_content;
+          const fullPath = journalEntry?.fullPath || path.resolve(diff.project_path, diff.file_path);
+          const existedAtStage = (journalEntry && 'diskExisted' in journalEntry)
+            ? Boolean(journalEntry.diskExisted)
+            : (originalContent === '');
+
           const { exists: diskExists, content: diskContent } = readTextIfExists(fullPath, fsOps);
           const diskHash = diskExists
             ? crypto.createHash('sha256').update(diskContent).digest('hex')
             : null;
 
-          const isRenamed = diskExists && diskHash === diff.sha256_hash;
-          const isUntouched = (!diskExists && !diff.original_sha256) ||
-            (diskExists && diff.original_sha256 && diskHash === diff.original_sha256);
+          const isRenamed = diskExists && diskHash === stagedHash;
+          const isUntouched = originalHash
+            ? (diskExists && diskHash === originalHash)
+            : (existedAtStage ? (diskExists && diskContent === '') : !diskExists);
           const isDrift = !isRenamed && !isUntouched;
 
           return {
             diff,
+            journalEntry,
+            stagedHash,
+            originalHash,
+            originalContent,
+            existedAtStage,
             fullPath,
             diskExists,
             diskHash,
@@ -647,8 +746,8 @@ export class KruschStateManager {
                   filePath: item.diff.file_path,
                   outcome: 'DRIFT_DETECTED_REJECTED',
                   diskHash: item.diskHash,
-                  stagedHash: item.diff.sha256_hash,
-                  originalHash: item.diff.original_sha256,
+                  stagedHash: item.stagedHash,
+                  originalHash: item.originalHash,
                   reason: 'Disk contents modified out-of-band during crash recovery'
                 })]
               );
@@ -718,16 +817,16 @@ export class KruschStateManager {
         // Case 4: Partial batch crash! Some files were renamed, others were not.
         // 1. First validate ALL base preimage hashes BEFORE mutating disk.
         for (const item of inspected) {
-          if (item.isRenamed && item.diff.original_sha256) {
-            if (item.diff.original_content === null || item.diff.original_content === undefined) {
+          if (item.isRenamed && item.originalHash) {
+            if (item.originalContent === null || item.originalContent === undefined) {
               throw new Error(
-                `CORRUPT_BASE_PREIMAGE: missing original_content for recorded base SHA-256 (${item.diff.original_sha256}) on file '${item.diff.file_path}'`
+                `CORRUPT_BASE_PREIMAGE: missing original_content for recorded base SHA-256 (${item.originalHash}) on file '${item.diff.file_path}'`
               );
             }
-            const preimageHash = crypto.createHash('sha256').update(item.diff.original_content).digest('hex');
-            if (preimageHash !== item.diff.original_sha256) {
+            const preimageHash = crypto.createHash('sha256').update(item.originalContent).digest('hex');
+            if (preimageHash !== item.originalHash) {
               throw new Error(
-                `CORRUPT_BASE_PREIMAGE: stored original_content SHA-256 (${preimageHash}) does not match recorded base SHA-256 (${item.diff.original_sha256}) for file '${item.diff.file_path}'`
+                `CORRUPT_BASE_PREIMAGE: stored original_content SHA-256 (${preimageHash}) does not match recorded base SHA-256 (${item.originalHash}) for file '${item.diff.file_path}'`
               );
             }
           }
@@ -737,8 +836,8 @@ export class KruschStateManager {
         try {
           for (const item of inspected) {
             if (item.isRenamed) {
-              if (item.diff.original_sha256) {
-                atomicWriteFile(item.fullPath, item.diff.original_content, fsOps);
+              if (item.originalHash || item.existedAtStage) {
+                atomicWriteFile(item.fullPath, item.originalContent ?? '', fsOps);
               } else {
                 const unlinked = unlinkIfExists(item.fullPath, fsOps);
                 if (unlinked) {
@@ -835,16 +934,31 @@ export class KruschStateManager {
     }
 
     const baseProject = projectPath || task.project_path || process.cwd();
+    const canonicalBaseProject = canonicalizePaths(baseProject, '.').projectPath;
 
-    // Pre-flight compound-recovery check: reconcile any residual APPLYING rows from a prior crash/compound-rollback failure
+    // Pre-flight compound-recovery check: reconcile any residual APPLYING rows or journal entries from a prior crash/compound-rollback failure
     let promotedInPreFlight = [];
     const inFlightRes = await queryFn(
       `SELECT id FROM krusch_staged_diffs WHERE task_id = $1 AND status = 'APPLYING' ORDER BY id ASC`,
       [taskId]
     );
-    if (inFlightRes.rows.length > 0) {
+    const inFlightJournalRes = await queryFn(
+      `SELECT id, files FROM krusch_apply_journal WHERE task_id = $1 AND state = 'APPLYING' ORDER BY id ASC`,
+      [taskId]
+    );
+    if (inFlightRes.rows.length > 0 || inFlightJournalRes.rows.length > 0) {
       const inFlightIds = new Set(inFlightRes.rows.map(r => r.id));
-      const rec = await KruschStateManager.recoverInFlightApplies(baseProject, { ...options, strict: true });
+      for (const jRow of inFlightJournalRes.rows) {
+        for (const entry of parseJournalFiles(jRow.files)) {
+          if (entry && entry.diffId !== undefined && entry.diffId !== null) {
+            const idNum = Number(entry.diffId);
+            if (Number.isInteger(idNum)) {
+              inFlightIds.add(idNum);
+            }
+          }
+        }
+      }
+      const rec = await KruschStateManager.recoverInFlightApplies(canonicalBaseProject, { ...options, strict: true });
       promotedInPreFlight = rec.filter(
         r => r.outcome === 'APPLIED' && inFlightIds.has(r.id) && (!diffIds || diffIds.includes(r.id))
       );
@@ -984,37 +1098,42 @@ export class KruschStateManager {
 
     const targetIds = targets.map(d => d.id);
 
-    // Step 3: Write durable Two-Phase Commit Apply Journal in PostgreSQL
+    // Step 3: Write durable Two-Phase Commit Apply Journal in PostgreSQL atomically with APPLYING status intent
     const journalPayload = preparedFiles.map(f => ({
       diffId: f.diff.id,
       filePath: f.diff.file_path,
       stagedHash: f.diff.sha256_hash,
       originalHash: f.diff.original_sha256,
+      originalContent: f.originalContent ?? null,
+      diskExisted: Boolean(f.diskExisted),
       fullPath: f.fullPath
     }));
 
+    const withJournalTxFn = options?.withJournalTransactionFn || withTransaction;
     let journalId;
     try {
-      const journalRes = await queryFn(`
-        INSERT INTO krusch_apply_journal (task_id, project_path, state, files, created_at)
-        VALUES ($1, $2, 'APPLYING', $3, NOW())
-        RETURNING id;
-      `, [taskId, baseProject, JSON.stringify(journalPayload)]);
-      journalId = journalRes.rows[0]?.id;
+      await withJournalTxFn(async (client) => {
+        const journalRes = await client.query(`
+          INSERT INTO krusch_apply_journal (task_id, project_path, state, files, created_at)
+          VALUES ($1, $2, 'APPLYING', $3, NOW())
+          RETURNING id;
+        `, [taskId, canonicalBaseProject, JSON.stringify(journalPayload)]);
+        journalId = journalRes.rows[0]?.id;
 
-      // Journal APPLYING intent on staged diffs
-      await queryFn(`UPDATE krusch_staged_diffs SET status = 'APPLYING' WHERE id = ANY($1::int[])`, [targetIds]);
-      for (const diff of targets) {
-        await queryFn(
-          `INSERT INTO krusch_events (task_id, turn_id, event_type, payload, created_at)
-           VALUES ($1, NULL, 'apply_started', $2, NOW())`,
-          [taskId, JSON.stringify({
-            diffId: diff.id,
-            filePath: diff.file_path,
-            journalId
-          })]
-        );
-      }
+        // Journal APPLYING intent on staged diffs
+        await client.query(`UPDATE krusch_staged_diffs SET status = 'APPLYING' WHERE id = ANY($1::int[])`, [targetIds]);
+        for (const diff of targets) {
+          await client.query(
+            `INSERT INTO krusch_events (task_id, turn_id, event_type, payload, created_at)
+             VALUES ($1, NULL, 'apply_started', $2, NOW())`,
+            [taskId, JSON.stringify({
+              diffId: diff.id,
+              filePath: diff.file_path,
+              journalId
+            })]
+          );
+        }
+      });
     } catch (journalErr) {
       for (const prep of preparedFiles) {
         try {

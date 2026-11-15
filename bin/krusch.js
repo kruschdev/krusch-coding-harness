@@ -610,6 +610,8 @@ program
         enableEphemeralMode();
       }
       await migrate();
+      await KruschStateManager.recoverInFlightApplies();
+      await KruschStateManager.pruneExpiredLeases();
     } catch (_) {}
     startBridgeServer({ port: parseInt(options.port, 10), host: options.host });
   });
