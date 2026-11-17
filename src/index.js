@@ -20,6 +20,7 @@ export { KruschFSM, HARNESS_PHASES } from './workflow/fsm.js';
 export { KruschSymbolIndexer } from './brain/indexer.js';
 export { startMcpServer } from './server/mcp-server.js';
 export { KruschSandbox } from './verify/sandbox.js';
+export { HARNESS_CHOKE_POINT_FILES, planHarnessDisjointWaves } from './workflow/wave-planner.js';
 export { KruschTelemetry } from './brain/telemetry.js';
 export { generateUnifiedDiff } from './utils/diff-patch.js';
 export { enableEphemeralMode, disableEphemeralMode, isEphemeralMode, closePool, query, withTransaction, pool } from './brain/pool.js';

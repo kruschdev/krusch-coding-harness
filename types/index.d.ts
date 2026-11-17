@@ -504,9 +504,31 @@ export interface SandboxExecutionResult {
   stderr: string;
   passed: boolean;
   durationMs: number;
-  sandboxType: 'bwrap' | 'process-jail';
+  sandboxType: 'bwrap' | 'node_permission' | 'process_jail' | 'process-jail';
   replayToken: string;
 }
+
+export const HARNESS_CHOKE_POINT_FILES: readonly string[];
+
+export function planHarnessDisjointWaves(params?: {
+  tasks?: Array<{ id?: string; workOrderId?: string; title?: string; targetFiles?: string[]; files?: string[] }>;
+  edges?: Array<{ from?: string; to?: string; source_path?: string; target_path?: string }>;
+  chokePoints?: Iterable<string>;
+}): {
+  waves: Array<{ wave: number; taskIds: string[]; parallelizable: boolean; leasedFileCount: number }>;
+  leases: Array<{
+    taskId: string;
+    title: string;
+    targetFiles: string[];
+    hop1Dependents: string[];
+    hop2Dependents: string[];
+    leaseCone: string[];
+    reservedChokePoints: string[];
+    wave: number;
+  }>;
+  collisions: Array<{ tasks: [string, string]; sharedFiles: string[] }>;
+  reservedOrchestratorFiles: string[];
+};
 
 export class KruschSandbox {
   static isBwrapAvailable(): boolean;

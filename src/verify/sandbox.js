@@ -153,7 +153,7 @@ export class KruschSandbox {
 
     const replayToken = KruschSandbox.computeReplayToken(command, fileManifest, envSnapshot);
 
-    const useBwrap = !forceProcess && isBubblewrapAvailable();
+    const useBwrap = !forceProcess && options.nodePermission !== true && isBubblewrapAvailable();
 
     if (useBwrap) {
       return KruschSandbox._runBubblewrap({
@@ -170,6 +170,32 @@ export class KruschSandbox {
       });
     }
 
+    if (
+      options.nodePermission === true ||
+      (forceProcess && /^node\s+(?!--(?:experimental-)?permission\b)/i.test(command.trim()) && options.nodePermission !== false)
+    ) {
+      const parsedTokens = [];
+      const tokRe = /"([^"]*)"|'([^']*)'|(\S+)/g;
+      let m;
+      while ((m = tokRe.exec(command.trim())) !== null) {
+        parsedTokens.push(m[1] ?? m[2] ?? m[3]);
+      }
+      if (parsedTokens[0] === 'node') {
+        return KruschSandbox._runNodePermission({
+          command,
+          nodeArgs: parsedTokens.slice(1),
+          cwd: stagedDir || cwd,
+          projectPath: cwd,
+          extraReadPaths: Array.isArray(options.extraReadPaths) ? options.extraReadPaths : [],
+          allowWritePaths: Array.isArray(options.allowWritePaths) ? options.allowWritePaths : [],
+          timeoutMs,
+          envSnapshot,
+          fileManifest,
+          replayToken
+        });
+      }
+    }
+
     return KruschSandbox._runProcessJail({
       command,
       cwd: stagedDir || cwd,
@@ -177,6 +203,152 @@ export class KruschSandbox {
       envSnapshot,
       fileManifest,
       replayToken
+    });
+  }
+
+  /**
+   * Cross-platform Node 22 `--permission` capability jail (`node_permission`)
+   * restricting FS reads strictly to the staged workspace + explicit `extraReadPaths`,
+   * denying FS writes unless allowed, and stripping host secrets.
+   */
+  static async _runNodePermission({
+    command,
+    nodeArgs,
+    cwd,
+    projectPath,
+    extraReadPaths = [],
+    allowWritePaths = [],
+    timeoutMs,
+    envSnapshot,
+    fileManifest,
+    replayToken
+  }) {
+    const startTime = Date.now();
+    const realCwd = fs.existsSync(cwd) ? fs.realpathSync(cwd) : path.resolve(cwd);
+    const readSet = new Set([realCwd, path.dirname(process.execPath)]);
+    if (projectPath && fs.existsSync(projectPath)) {
+      const nmPath = path.join(projectPath, 'node_modules');
+      if (fs.existsSync(nmPath)) {
+        try {
+          readSet.add(fs.realpathSync(nmPath));
+        } catch (_) {}
+      }
+    }
+    for (const p of extraReadPaths) {
+      if (typeof p === 'string' && fs.existsSync(p)) {
+        try {
+          readSet.add(fs.realpathSync(p));
+        } catch (_) {}
+      }
+    }
+
+    const writeSet = new Set();
+    for (const wp of allowWritePaths) {
+      if (typeof wp === 'string' && fs.existsSync(wp)) {
+        try {
+          writeSet.add(fs.realpathSync(wp));
+        } catch (_) {}
+      }
+    }
+
+    const permFlag = process.allowedNodeEnvironmentFlags?.has('--permission')
+      ? '--permission'
+      : '--experimental-permission';
+    const permArgs = [permFlag];
+    for (const rp of readSet) permArgs.push(`--allow-fs-read=${rp}`);
+    for (const wp of writeSet) permArgs.push(`--allow-fs-write=${wp}`);
+    permArgs.push(...nodeArgs);
+
+    const sandboxConfig = {
+      engine: 'node_permission',
+      fsReadRestricted: true,
+      fsWriteRestricted: writeSet.size === 0,
+      childProcessBlocked: true,
+      cwd: realCwd
+    };
+
+    const minimalEnv = {
+      CI: 'true',
+      FORCE_COLOR: '0',
+      NODE_ENV: 'test',
+      NODE_NO_WARNINGS: '1',
+      PATH: envSnapshot.PATH
+    };
+
+    return new Promise((resolve) => {
+      let stdout = '';
+      let stderr = '';
+      let timedOut = false;
+
+      const proc = spawn(process.execPath, permArgs, {
+        cwd: realCwd,
+        detached: true,
+        shell: false,
+        env: minimalEnv
+      });
+
+      const timer = setTimeout(() => {
+        timedOut = true;
+        try {
+          process.kill(-proc.pid, 'SIGKILL');
+        } catch (_) {
+          try { proc.kill('SIGKILL'); } catch (_) {}
+        }
+      }, timeoutMs);
+
+      proc.stdout.on('data', (data) => { stdout += data.toString(); });
+      proc.stderr.on('data', (data) => { stderr += data.toString(); });
+
+      proc.on('close', (exitCode) => {
+        clearTimeout(timer);
+        const durationMs = Date.now() - startTime;
+        if (timedOut) {
+          resolve({
+            command,
+            exitCode: -1,
+            stdout: stdout.trim(),
+            stderr: `${stderr.trim()}\nNode permission sandbox timeout after ${timeoutMs}ms (killed process group).`,
+            passed: false,
+            durationMs,
+            sandboxType: 'node_permission',
+            sandboxConfig,
+            envSnapshot: minimalEnv,
+            fileManifest,
+            replayToken
+          });
+          return;
+        }
+        resolve({
+          command,
+          exitCode: exitCode ?? -1,
+          stdout: stdout.trim(),
+          stderr: stderr.trim(),
+          passed: exitCode === 0,
+          durationMs,
+          sandboxType: 'node_permission',
+          sandboxConfig,
+          envSnapshot: minimalEnv,
+          fileManifest,
+          replayToken
+        });
+      });
+
+      proc.on('error', (err) => {
+        clearTimeout(timer);
+        resolve({
+          command,
+          exitCode: -1,
+          stdout: stdout.trim(),
+          stderr: `Node permission sandbox spawn error: ${err.message}`,
+          passed: false,
+          durationMs: Date.now() - startTime,
+          sandboxType: 'node_permission',
+          sandboxConfig,
+          envSnapshot: minimalEnv,
+          fileManifest,
+          replayToken
+        });
+      });
     });
   }
 
