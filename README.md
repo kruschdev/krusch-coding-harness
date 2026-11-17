@@ -10,12 +10,60 @@
   <a href="https://github.com/kruschdev/krusch-coding-harness/actions/workflows/ci.yml"><img src="https://github.com/kruschdev/krusch-coding-harness/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/kruschdev/krusch-coding-harness/actions/workflows/trajectory-eval.yml"><img src="https://github.com/kruschdev/krusch-coding-harness/actions/workflows/trajectory-eval.yml/badge.svg" alt="Trajectory Eval CI Gate"></a>
   <img src="https://img.shields.io/badge/license-MIT-green.svg?style=flat-square" alt="License MIT">
-  <img src="https://img.shields.io/badge/tests-108%20passed-brightgreen.svg?style=flat-square" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-118%20passed-brightgreen.svg?style=flat-square" alt="Tests">
   <img src="https://img.shields.io/badge/golden%20DAG-100%2F100-brightgreen.svg?style=flat-square" alt="Golden DAG 100/100">
   <a href="https://hol.org/guard/extension-studio?extension=mcp.krusch"><img src="https://img.shields.io/badge/HOL_Guard-Catalog_Listed-0B0F17?style=flat-square&logo=shield&logoColor=00F5D4" alt="HOL Guard Catalog"></a>
 </p>
 
-> **Core Thesis**: *Models are ephemeral compute; PostgreSQL is the brain. Keep workflow, context, tests, and approvals consistent while making models interchangeable.*
+> **Core Thesis**: *Models are ephemeral compute; PostgreSQL is the brain. Keep workflow, context, tests, and approvals consistent while making models interchangeable. Deterministic gates do not guarantee that a model's plan is semantically right; they bound blast radius, block repeatable defect classes, and guarantee clean rollback when verification fails.*
+
+---
+
+## ⚡ 5-Minute External Engineer Verification & Recorded 5-Step Demo
+
+[![Watch Recorded 20s Live Execution (PostgreSQL 16 + Bubblewrap)](https://krusch.dev/assets/video/harness-loop-demo-poster.jpg)](https://krusch.dev/assets/video/harness-loop-demo.mp4)
+
+> ▶️ **[Watch 20s Recorded Live Execution (`720p` MP4)](https://krusch.dev/assets/video/harness-loop-demo.mp4)** · **[Raw Terminal Output (`.txt`)](https://krusch.dev/assets/video/harness-loop-demo.txt)** · **[Source (`scripts/demo-full-harness-loop.mjs`)](scripts/demo-full-harness-loop.mjs)** · **[15s `SIGKILL`-Only Clip](https://krusch.dev/assets/video/crash-recovery-demo.mp4)**
+>
+> Real execution against `PostgreSQL 16` and `Bubblewrap` (`bwrap --unshare-net`) with zero mocks: **(1)** stages a flawed AI billing patch in `krusch_staged_diffs` without touching disk, **(2)** fails isolated sandbox tests (`exitCode=1`) and rejects the diff (`status=REJECTED`), **(3)** stages and sandbox-verifies the repaired 2-file integer-cent fix (`exitCode=0`), **(4)** kills `applyDiffBatch()` mid-apply with `SIGKILL` after file 1 is renamed and rolls back torn state via cold-worker `recoverInFlightApplies()`, and **(5)** cleanly applies both files (`status=APPLIED`).
+
+### Path A: Zero-Postgres, Zero-API-Key Verification (`<30 seconds`)
+
+Runs in-process using built-in `PGlite` and deterministic fixtures (no Docker, no database server, no API keys):
+
+```bash
+git clone https://github.com/kruschdev/krusch-coding-harness.git
+cd krusch-coding-harness
+npm ci
+
+# 1. Run 52 fast unit tests (AST indexer, router gate, Slack HITL, cost kill-switch, SSRF fallback, policy floor)
+npm run test:unit
+
+# 2. Replay all 100 golden trajectories across 10 failure categories
+npm run eval:trajectories
+
+# 3. Verify TypeScript .d.ts declarations and run a complete ephemeral PGlite task
+npm run typecheck
+./bin/krusch-coding-harness.js run "Verify arithmetic module fix" --mock --ephemeral --auto-approve
+```
+
+### Path B: Full PostgreSQL 16 + Bubblewrap 5-Step Crash-Recovery Loop (`<3 minutes`)
+
+```bash
+# 1. Start PostgreSQL 16 (defaults to postgresql://postgres:postgres@localhost:5432/krusch)
+docker compose up -d
+
+# 2. Apply all 11 SQL schema & row-lock invariant migrations
+npm run migrate
+
+# 3. Run all 118 unit, ephemeral, and PostgreSQL integration tests (includes real SIGKILL crash test)
+npm test
+
+# 4. Run the live 5-step stage -> fail -> repair -> SIGKILL recovery -> apply loop
+node scripts/demo-full-harness-loop.mjs
+```
+
+> **When simpler suffices:** For a single interactive developer session, an isolated `git worktree`, staged diff, and sandboxed test run (the zero-Docker SQLite default in [`krusch-stack`](https://github.com/kruschdev/krusch-stack)) achieves practical safety with less operational surface. PostgreSQL write-ahead journaling targets unattended background daemons and multi-worker queues where crash recovery, file-lease concurrency, and durable audit state justify a database.
 
 ---
 
@@ -106,13 +154,13 @@ flowchart TD
 
 ---
 
-## 📊 Empirical Benchmarks (`75/75` Clean-Room SHA-256 Gates)
+## 📊 Empirical Benchmarks (`95/95` Clean-Room SHA-256 Gates, Self-Run in Lab)
 
-All **`40` SHA-256-pinned raw JSON audit logs** (`41` total incl. the `RouteWorks/RouterArena` [PR #169](https://github.com/RouteWorks/RouterArena/pull/169) live receipt bundle) across **`325,000+`** queries/traces and `12` external suites are published openly on Hugging Face at [**`krush420/sovereign-g4-benchmarks`**](https://huggingface.co/datasets/krush420/sovereign-g4-benchmarks) and interactively at [**`krush420/sovereign-router-arena`**](https://huggingface.co/spaces/krush420/sovereign-router-arena).
+> **Evaluation Provenance & Third-Party Reproduction Status**: Every benchmark below uses a public external dataset run in my lab, with **`49` SHA-256-pinned raw audit log bundles (`64` files)** across **`335,000+`** queries/traces and **`14` external suites** published openly on Hugging Face at [**`krush420/sovereign-g4-benchmarks`**](https://huggingface.co/datasets/krush420/sovereign-g4-benchmarks) and interactively at [**`krush420/sovereign-router-arena`**](https://huggingface.co/spaces/krush420/sovereign-router-arena) (including the maintainer-merged `RouteWorks/RouterArena` [PR #169](https://github.com/RouteWorks/RouterArena/pull/169) receipt bundle on `main @ 844e93b`). **No outside party has yet re-run these harness evaluations**; reproduction issues and independent verification attempts are welcome.
 
 ### 1. Aider Polyglot (`225 / 225` Multi-Language Coding Tasks)
 
-Evaluated hermetically across **all `225` official `Aider-AI/polyglot-benchmark` tasks** (`cpp`, `go`, `java`, `javascript`, `python`, `rust` with mandatory upstream test un-skipping: `--include-ignored`, `xtest` → `test`, `-DEXERCISM_RUN_ALL_TESTS=1`, `@Disabled` stripped, pristine test-hash verification, and clean-workspace `.meta`/`.docs`/test exclusion) pairing open-weights `gpt-oss:120b` with `KruschSandbox` + `evaluateVerifyOnStop`:
+Evaluated hermetically across **all `225` official `Aider-AI/polyglot-benchmark` tasks** (`cpp`, `go`, `java`, `javascript`, `python`, `rust` with mandatory upstream test un-skipping: `--include-ignored`, `xtest` → `test`, `-DEXERCISM_RUN_ALL_TESTS=1`, `@Disabled` stripped, pristine test-hash verification, and clean-workspace `.meta`/`.docs`/test exclusion) pairing open-weights `gpt-oss:120b` with isolated `bwrap` sandbox test execution + `evaluateVerifyOnStop`:
 
 | Track | Exercises | 1-Shot `Pass@1` | **`krusch-coding-harness` 2PC `Verify-on-Stop` `Pass@2`** | Tasks Self-Healed | Multiplier |
 | :--- | :---: | :---: | :---: | :---: | :---: |
@@ -124,7 +172,7 @@ Evaluated hermetically across **all `225` official `Aider-AI/polyglot-benchmark`
 | **C++** (`cmake -DEXERCISM_RUN_ALL_TESTS=1`) | `26` | `3.85%` (`1/26`) | **`42.31%` (`11/26`)** | `+10` | **`11.00x`** |
 | **Java** (`./gradlew test`, `@Disabled` stripped) | `47` | `17.02%` (`8/47`) | **`40.43%` (`19/47`)** | `+11` | `2.38x` |
 
-> Matches published cloud **`Claude 3.5 Sonnet` (`51.6%`)** and more than doubles **`GPT-4o` (`23.1%`)** on `Aider Polyglot` at `$0` external API cost with `0` truncated diffs committed.
+> **Attribution**: The `19.56% -> 51.56%` lift (`+72` tasks) comes from **isolated sandbox test execution, compiler/test error feedback, and bounded repair retries** (`Pass@2` `Verify-on-Stop`), reaching parity with published single-model `Claude 3.5 Sonnet` (`51.6%`) reference scores at `$0` external API cost with `0` truncated diffs committed.
 
 ### 2. BIRD-SQL Mini-Dev (`500 / 500` Dirty Enterprise SQLite Queries × `11` Databases)
 
@@ -148,48 +196,19 @@ Evaluated across **all `1,046` official `ethz-spylab/agentdojo` (`v1.2.2`) episo
 | `spotlighting_delimited_only` (`<UNTRUSTED_CONTENT>` Only) | `69.07%` (`67/97`) | `54.58%` | `14.86%` (`141/949` hijacked) | `85.14%` | `0` |
 | **`krusch_sovereign_defense` (`createKruschPolicyFloor` + Taint Guard)** | **`61.86%` (`0.00 pp` loss)** | `49.95%` | **`0.00%` (`0/949` hijacked)** | **`100.00%`** | **`83`** |
 
-### 4. Official DolphinBench V5 & Generalized 2PC Tool-Action Harness (`19` Runs, `11,400` `openai/gpt-5.6-sol` Traces, `6` Families)
+> **Scope Qualification**: `0/949` hijacked (`0.00%` ASR across `1,046` episodes) is a **benchmark-specific finding** under active import-frozen `Object.freeze` policy floors, network-disabled `bwrap --unshare-net` sandboxes, and taint guards, **not** a claim of universal prompt-injection immunity.
 
-Evaluated across **`19` official `600`-task [DolphinBench](https://dolphinbench.ai/) evaluations (`11,400` `openai/gpt-5.6-sol` traces across `6` model families; `19/19` passing `dolphinbench.submission.validate`, `8/8` flagship archives verified & queued on `dolphinbench.ai`; full paper: [Return on Memory](https://krusch.dev/articles/return-on-memory-dolphinbench))**:
+### 4. Official DolphinBench & Generalized 2PC Tool-Action Harness (`28` Runs, `16,800` `openai/gpt-5.6-sol` Traces, `6` Families)
 
-| Configuration (`Checkpoint` + `Tool Loop`) | Official `gpt-5.6-sol` Score | Cost | Key Result |
+Evaluated across **`28` official `600`-task [DolphinBench](https://dolphinbench.ai/) runs (`16,800` `openai/gpt-5.6-sol` traces across `6` model families; `28/28` passing `dolphinbench.submission.validate`, `8` flagship `.zip` archives uploaded & `status: "queued"` on `dolphinbench.ai` awaiting leaderboard acceptance; full paper: [Return on Memory](https://krusch.dev/articles/return-on-memory-dolphinbench))**:
+
+| Configuration (`Checkpoint` + `Tool Loop`) | Official `gpt-5.6-sol` Score | Cost | Status & Key Result |
 | :--- | :---: | :---: | :--- |
-| **`#1 Overall` — `Gemini 4 Argon (Low, Std. Harness)`** | **`91.17%` (`547/600`)** | **`$24.54`** | `#1` Overall (`Argon Medium` **`89.17%`** @ `$24.57`) |
-| **Model-Matched — `GPT 5.6 Luna (High, Std. Harness)`** | **`81.33%` (`488/600`)** | **`$1.35`** | **`+10.67 pp` (`+64` tasks) higher & `71.0x` cheaper** than Official `#1` `GPT 5.6 Luna + Mem0` (`70.67%` @ `$96.21`); `Luna (Low, Std. Harness)` = **`76.67%`** (`460/600` @ `$1.10`, **`87.4x` cheaper**; `Luna Oracle@4 = 89.50%`) |
-| **`#1 Open-Weights` — `Google Gemma 4 31B (Stock, Std. Harness)`** | **`54.17%` (`325/600`)** | **`$0.00`** | `#1` Open-Weights (Queued UUID `288671ad-afe0-40a3-93af-b834c9bbd306`) |
-| **`Qwen3-Coder-30B-A3B Wave-4` (`Std. Harness` vs. `+ INV-STACK-10 2PC`)** | **`42.67%` / `42.00%`** | **`$0.00`** | `Std. Harness` = **`256/600`**; `+ INV-STACK-10 2PC` = **`252/600`**, cutting duplicate MCP calls by **`-95.2%` (`42 -> 2`)** and lifting 2-pass **`30B Oracle@2` to `50.33%` (`302/600`)** |
-| **Ensembles (`Oracle@19` Global / `Oracle@11` `$0.00` Open-Weights)** | **`97.00%` / `80.00%`** | **`—` / `$0.00`** | **`Oracle@19 = 97.00%` (`582/600`, `<= 3.00%` retrieval miss)** · **`$0.00` Open-Weights `Oracle@11 = 80.00%` (`480/600`)** |
-
----
-
-## 🚀 Quick Start (Zero Setup)
-
-You can evaluate `krusch-coding-harness` locally in **under 10 seconds** without installing PostgreSQL, Docker, or external API keys:
-
-### Option A: In-Process Ephemeral Mode (Recommended for testing)
-
-```bash
-# Clone the repository
-git clone https://github.com/kruschdev/krusch-coding-harness.git
-cd krusch-coding-harness
-npm install
-
-# Run a complete verified task in-process using PGlite + Mock adapter
-./bin/krusch-coding-harness.js run "Verify arithmetic module fix" --mock --ephemeral --auto-approve
-```
-
-### Option B: Docker Compose (Standard deployment)
-
-```bash
-# 1. Start PostgreSQL 16
-docker compose up -d
-
-# 2. Bootstrap database, probe connectivity, and run migrations
-./bin/krusch-coding-harness.js init
-
-# 3. Run mock task
-./bin/krusch-coding-harness.js run "Verify arithmetic module fix" --mock --auto-approve
-```
+| **`Gemini 4 Argon (Low, Std. Harness)`** | **`91.17%` (`547/600`)** | **`$24.54`** | Uploaded `dolphinbench.ai` submission `UUID c047b063` (`status: "queued"`; `Argon Low + Grounded v0.3` = **`90.67%`** [`544/600` @ `$30.54`] in self-run clean-room eval) |
+| **Model-Matched: `GPT 5.6 Luna (High + Grounded / Std.)`** | **`81.50%` (`489`) / `81.33%` (`488`)** | **`$1.35`** | **`+10.83 pp` (`+65` tasks) higher & `71.1x` cheaper** than published `70.67%` `GPT 5.6 Luna + Mem0` (`$96.21`); `Luna (Low)` = **`76.67%`** (`460/600` @ `$1.10`) |
+| **Open-Weights: `Gemma 4 31B` (`Wave-6 + Grounded` / `Stock`)** | **`57.33%` (`344`) / `54.17%` (`325`)** | **`$0.00`** | Highest open-weights score in self-run 28-run eval (`57.33%` [`krush420/gemma4-31b-sre-lora`](https://huggingface.co/krush420/gemma4-31b-sre-lora)); stock `54.17%` uploaded & queued (`UUID 288671ad`) |
+| **`Qwen3-Coder-30B-A3B Wave-4` (`Std. Harness` vs. `+ 2PC`)** | **`42.67%` / `42.00%`** | **`$0.00`** | `Std. Harness` = **`256/600`**; `+ 2PC` = **`252/600`**, cutting duplicate MCP calls by **`-95.2%` (`42 -> 2`)** and lifting 2-pass **`30B Oracle@2` to `50.33%` (`302/600`)** |
+| **Ensembles (`Oracle@28` Global / `Oracle@17` `$0.00` Open-Weights)** | **`98.33%` / `83.17%`** | **`N/A` / `$0.00`** | **`Oracle@28 = 98.33%` (`590/600`, `<= 1.67%` retrieval miss)** · **`$0.00` Open-Weights `Oracle@17 = 83.17%` (`499/600`)** |
 
 ---
 
@@ -206,7 +225,7 @@ Physical disk protection is meaningless if the verification step can escape and 
 
 ## 💾 Storage Engine & Apply Journal
 
-> **Terminology — what "2PC" means here.** In this project, "2PC" is the name of a *journaled, crash-recoverable multi-file apply protocol*: PostgreSQL records durable write-ahead intent (`krusch_apply_journal`, `krusch_staged_diffs.status = 'APPLYING'`), each file is written to a temporary sibling, `fsync`'d, and swapped in with a POSIX atomic `rename`, and `recoverInFlightApplies()` repairs any interrupted batch on restart. It is **not** classic distributed two-phase commit with transactional participants. Each individual file replacement is atomic, but a **multi-file batch is not atomically visible**: another process can observe a partly-applied batch until it completes or recovery rolls it back. Run `node scripts/demo-crash-recovery.mjs` to see a `SIGKILL` mid-apply and the recovery.
+> **Terminology: what "2PC" means here.** In this project, "2PC" is the name of a *journaled, crash-recoverable multi-file apply protocol*: PostgreSQL records durable write-ahead intent (`krusch_apply_journal`, `krusch_staged_diffs.status = 'APPLYING'`), each file is written to a temporary sibling, `fsync`'d, and swapped in with a POSIX atomic `rename`, and `recoverInFlightApplies()` repairs any interrupted batch on restart. It is **not** classic distributed two-phase commit with transactional participants. Each individual file replacement is atomic, but a **multi-file batch is not atomically visible**: another process can observe a partly-applied batch until it completes or recovery rolls it back. Run `node scripts/demo-full-harness-loop.mjs` (or `node scripts/demo-crash-recovery.mjs`) to see a `SIGKILL` mid-apply and cold-worker recovery.
 
 The apply engine treats disk writes like database transactions:
 
@@ -281,7 +300,7 @@ krusch-coding-harness eval-trajectories --json
 
 ## 🛡️ Production Agentic Safety, Resilience & Golden DAG CI Systems
 
-`krusch-coding-harness` exports four standalone zero-cloud-dependency subpath modules (`types/agentic-15.d.ts` typed) and exposes matching `:3778` HTTP Control Bridge endpoints (full state-machine design in [**Paper #23 — The 15 Production Agentic Systems**](https://krusch.dev/articles/fifteen-production-agent-systems)):
+`krusch-coding-harness` exports four standalone zero-cloud-dependency subpath modules (`types/agentic-15.d.ts` typed) and exposes matching `:3778` HTTP Control Bridge endpoints (full state-machine design in [**Paper #23: The 15 Production Agentic Systems**](https://krusch.dev/articles/fifteen-production-agent-systems)):
 
 | Subpath Import | Core Class / Runner | Production Invariants & `:3778` Control Bridge Routes |
 | :--- | :--- | :--- |
@@ -320,7 +339,7 @@ krusch-coding-harness eval-trajectories --json
 The test suite exercises unit behavior, storage engine properties, sandbox isolation, PostgreSQL integration, and the 100-trajectory Golden DAG gate:
 
 ```bash
-# Run fast unit tests (51 tests across AST indexer, router heuristics, HITL, cost kill-switch, browser fallback, DAG gate)
+# Run fast unit tests (52 tests across AST indexer, router heuristics, HITL, cost kill-switch, browser fallback, DAG gate)
 npm run test:unit
 
 # Replay all 100 golden trajectories across 10 production categories
@@ -329,7 +348,7 @@ npm run eval:trajectories
 # Run storage engine property & PostgreSQL integration tests
 npm run test:integration
 
-# Run full test suite (108 tests across unit, integration, and ephemeral)
+# Run full test suite (118 tests across unit, integration, and ephemeral)
 npm test
 
 # Verify TypeScript declarations (zero errors across types/index.d.ts & types/agentic-15.d.ts)
