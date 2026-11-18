@@ -27,6 +27,14 @@
 >
 > Real execution against `PostgreSQL 16` and `Bubblewrap` (`bwrap --unshare-net`) with zero mocks: **(1)** stages a flawed AI billing patch in `krusch_staged_diffs` without touching disk, **(2)** fails isolated sandbox tests (`exitCode=1`) and rejects the diff (`status=REJECTED`), **(3)** stages and sandbox-verifies the repaired 2-file integer-cent fix (`exitCode=0`), **(4)** kills `applyDiffBatch()` mid-apply with `SIGKILL` after file 1 is renamed and rolls back torn state via cold-worker `recoverInFlightApplies()`, and **(5)** cleanly applies both files (`status=APPLIED`).
 
+### Agent-Assisted Setup
+
+Ask your coding agent (Claude Code, Codex, Cursor, Windsurf, or Antigravity):
+
+```text
+Read https://raw.githubusercontent.com/kruschdev/krusch-coding-harness/main/INSTALL.md and set up krusch-coding-harness on this machine.
+```
+
 ### Path A: Zero-Postgres, Zero-API-Key Verification (`<30 seconds`)
 
 Runs in-process using built-in `PGlite` and deterministic fixtures (no Docker, no database server, no API keys):
@@ -375,4 +383,4 @@ To preserve reliability and prevent architectural bloat:
 
 ## License
 
-MIT © 2026 Kevin Ruschman (KruschDev)
+MIT · Copyright (c) 2026 kruschdev
