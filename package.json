@@ -1,6 +1,6 @@
 {
   "name": "krusch-coding-harness",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Postgres-backed coding harness that stages diffs, runs tests, and only then writes the working tree.",
   "type": "module",
   "main": "src/index.js",

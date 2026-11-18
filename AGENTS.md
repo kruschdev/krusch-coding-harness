@@ -1,7 +1,7 @@
-# AGENTS.md — Krusch Coding Harness
+# AGENTS.md: Krusch Coding Harness
 
 > **Project**: `krusch-coding-harness`
-> **Maintainer**: Kevin Ruschman (KruschDev)
+> **Maintainer**: `kruschdev <kruschdev@users.noreply.github.com>`
 > **Core Thesis**: Models are ephemeral compute; PostgreSQL is the brain. Keep workflow, context, tests, and approvals consistent while making models interchangeable.
 
 ---
@@ -17,8 +17,8 @@
    - Files are written to physical disk only after automated test verification passes and approval policy criteria are satisfied.
 
 3. **Routing Discipline ("Don't spend a model call just to pick a model")**:
-   - Stage 1 (L1) microsecond CPU heuristic gate intercepts obvious SQL, syntax, math, and closed-world tasks for $0.00 in <15µs (`krusch-pre-router`), routing local execution to `qwen2.5-coder:7b` (`krusch`), `gemma4:e4b` / `hermes3:latest` (`kruschserv`), or `qwen3-coder-30b-moe:latest` (`kruschdev`).
-   - Escalate to frontier reasoning (`gemini-4-argon` with `thinkingLevel: 'high'` & multi-hop `CONTINUATION`, `claude-3-7-sonnet`) only on ambiguous intent, high complexity, or repeated verification failures.
+   - Stage 1 (L1) microsecond CPU heuristic gate intercepts obvious SQL, syntax, math, and closed-world tasks for `$0.00` in `<15µs` (`krusch-pre-router`), routing local Ollama execution to `qwen2.5-coder:7b`, `gemma4:e4b` / `hermes3:latest`, or `qwen3-coder-30b-moe:latest`.
+   - Escalate to frontier reasoning (`gemini-4-argon` with `thinkingLevel: 'high'` & multi-hop `CONTINUATION`) only on ambiguous intent, high complexity, or repeated verification failures.
 
 4. **Actionable Failure Attribution**:
    - Failures must be attributed to specific modules (`ContextManagement`, `ToolUse`, `ObservationManagement`, `AgentLoop`) using `KruschFailureClassifier` (`KruschModularRSI`) rather than blind re-prompting.
@@ -57,11 +57,13 @@
 - `bin/krusch-coding-harness.js` & `bin/krusch.js`: Unified CLI binary entry points (supports `krusch-coding-harness`, `krusch-harness`, and `krusch` CLI aliases).
 - `src/control/`: Headless Control Plane (`control-plane.js`: Ecosystem Doctor, `:3778` HTTP Bridge, L1/L2 `routePipeline`, `redactSecrets`, Headless CI, Model-Switch Verifier, and 7-Step Write Invariant proof).
 - `src/brain/`: PostgreSQL state management, connection pooling, context retrieval (`krusch-context-mcp` bridge).
-- `src/router/`: Cascade router integrating `krusch-pre-router` and `krusch-cascade-router`.
+- `src/router/`: Cascade router integrating `krusch-pre-router` and `krusch-cascade-router`, plus `cost-killswitch.js` (`$0.50` Cost Kill-Switch & local Ollama fallback middleware).
 - `src/models/`: Normalized model adapters (OpenRouter, Anthropic, Gemini, Ollama, Mock).
 - `src/workflow/`: `KruschStateMachine`, `KruschTrajectoryGuard`, `KruschFailureClassifier` (`KruschModularRSI`).
 - `src/verify/`: Ground-truth test runner, verification contracts (`krusch.verify.json`), and staged-tree sandboxing.
-- `src/approvals/`: Human-in-the-loop and automated approval policies.
+- `src/approvals/`: Human-in-the-loop and automated approval policies, including `hitl-slack-gate.js` (72h lease + fail-closed `v0=` HMAC-SHA256 Slack webhook resume).
+- `src/tools/`: Tool execution adapters, including `api-browser-fallback.js` (SSRF-hardened REST-to-GUI browser failover).
+- `src/eval/`: Golden trajectory evaluation gates, including `trajectory-dag-gate.js` (100-trajectory Golden DAG CI gate across 10 categories).
 - `src/server/`: Model Context Protocol (MCP) stdio server (7-tool async interface with Invariant #567 annotations).
 
 ---
