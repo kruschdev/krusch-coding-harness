@@ -35,6 +35,9 @@
     "test/fixtures/golden-trajectories-100.json",
     "LICENSE",
     "README.md",
+    "INSTALL.md",
+    "CONTRIBUTING.md",
+    "server.json",
     "docker-compose.yml"
   ],
   "bin": {
