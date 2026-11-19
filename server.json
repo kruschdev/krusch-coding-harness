@@ -1,17 +1,18 @@
 {
-  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "dev.krusch/krusch-coding-harness",
+  "title": "Krusch Coding Harness",
   "description": "Two-phase commit coding harness that stages diffs, runs sandboxed tests, and applies atomically.",
   "repository": {
     "url": "https://github.com/kruschdev/krusch-coding-harness",
     "source": "github"
   },
-  "version": "0.2.0",
+  "version": "0.2.1",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "krusch-coding-harness",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"
