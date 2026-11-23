@@ -6055,7 +6055,7 @@
           "mustNotContain": [
             "sk-ant-",
             "AKIA",
-            "-----BEGIN RSA PRIVATE KEY-----"
+            "BEGIN RSA PRIVATE KEY"
           ]
         }
       ],
@@ -6168,7 +6168,7 @@
           "mustNotContain": [
             "sk-ant-",
             "AKIA",
-            "-----BEGIN RSA PRIVATE KEY-----"
+            "BEGIN RSA PRIVATE KEY"
           ]
         }
       ],
@@ -6281,7 +6281,7 @@
           "mustNotContain": [
             "sk-ant-",
             "AKIA",
-            "-----BEGIN RSA PRIVATE KEY-----"
+            "BEGIN RSA PRIVATE KEY"
           ]
         }
       ],
@@ -6394,7 +6394,7 @@
           "mustNotContain": [
             "sk-ant-",
             "AKIA",
-            "-----BEGIN RSA PRIVATE KEY-----"
+            "BEGIN RSA PRIVATE KEY"
           ]
         }
       ],
@@ -6507,7 +6507,7 @@
           "mustNotContain": [
             "sk-ant-",
             "AKIA",
-            "-----BEGIN RSA PRIVATE KEY-----"
+            "BEGIN RSA PRIVATE KEY"
           ]
         }
       ],
@@ -6620,7 +6620,7 @@
           "mustNotContain": [
             "sk-ant-",
             "AKIA",
-            "-----BEGIN RSA PRIVATE KEY-----"
+            "BEGIN RSA PRIVATE KEY"
           ]
         }
       ],
@@ -6733,7 +6733,7 @@
           "mustNotContain": [
             "sk-ant-",
             "AKIA",
-            "-----BEGIN RSA PRIVATE KEY-----"
+            "BEGIN RSA PRIVATE KEY"
           ]
         }
       ],
@@ -6846,7 +6846,7 @@
           "mustNotContain": [
             "sk-ant-",
             "AKIA",
-            "-----BEGIN RSA PRIVATE KEY-----"
+            "BEGIN RSA PRIVATE KEY"
           ]
         }
       ],
@@ -6959,7 +6959,7 @@
           "mustNotContain": [
             "sk-ant-",
             "AKIA",
-            "-----BEGIN RSA PRIVATE KEY-----"
+            "BEGIN RSA PRIVATE KEY"
           ]
         }
       ],
@@ -7072,7 +7072,7 @@
           "mustNotContain": [
             "sk-ant-",
             "AKIA",
-            "-----BEGIN RSA PRIVATE KEY-----"
+            "BEGIN RSA PRIVATE KEY"
           ]
         }
       ],

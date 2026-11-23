@@ -1,10 +1,10 @@
 <p align="center">
-  <strong>KRUSCH CODING HARNESS (v0.2.0)</strong><br>
+  <strong>KRUSCH CODING HARNESS (v0.2.2)</strong><br>
   <span>PostgreSQL-backed coding harness (<code>krusch-coding-harness</code>) that stages diffs, runs sandboxed tests, and only then writes to disk. Models are ephemeral workers.</span>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.2.0-blue.svg?style=flat-square" alt="Version 0.2.0">
+  <img src="https://img.shields.io/badge/version-0.2.2-blue.svg?style=flat-square" alt="Version 0.2.2">
   <img src="https://img.shields.io/badge/Node-%3E%3D20-blue.svg?style=flat-square" alt="Node Version">
   <img src="https://img.shields.io/badge/PostgreSQL-16%20ACID-blue.svg?style=flat-square" alt="PostgreSQL">
   <a href="https://github.com/kruschdev/krusch-coding-harness/actions/workflows/ci.yml"><img src="https://github.com/kruschdev/krusch-coding-harness/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -13,6 +13,7 @@
   <img src="https://img.shields.io/badge/tests-118%20passed-brightgreen.svg?style=flat-square" alt="Tests">
   <img src="https://img.shields.io/badge/golden%20DAG-100%2F100-brightgreen.svg?style=flat-square" alt="Golden DAG 100/100">
   <a href="https://hol.org/guard/extension-studio?extension=mcp.krusch"><img src="https://img.shields.io/badge/HOL_Guard-Catalog_Listed-0B0F17?style=flat-square&logo=shield&logoColor=00F5D4" alt="HOL Guard Catalog"></a>
+  <a href="https://addonaudit.com/addon/dev-krusch-krusch-coding-harness/"><img src="https://addonaudit.com/badges/dev-krusch-krusch-coding-harness.svg" alt="AddonAudit"></a>
 </p>
 
 > **Core Thesis**: *Models are ephemeral compute; PostgreSQL is the brain. Keep workflow, context, tests, and approvals consistent while making models interchangeable. Deterministic gates do not guarantee that a model's plan is semantically right; they bound blast radius, block repeatable defect classes, and guarantee clean rollback when verification fails.*
