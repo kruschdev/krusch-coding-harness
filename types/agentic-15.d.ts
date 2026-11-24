@@ -59,6 +59,7 @@ export class AsyncHitlSlackGate {
 
 export const DEFAULT_HARD_LIMIT_USD: number;
 export const DEFAULT_FALLBACK_MODEL: string;
+export const DEFAULT_FALLBACK_MAX_CONTEXT_TOKENS: number;
 export const LOCAL_ZERO_COST_MODELS: readonly string[];
 
 export class CostKillSwitchMiddleware {
@@ -66,7 +67,8 @@ export class CostKillSwitchMiddleware {
     hardLimitUsd?: number;
     softFallbackRatio?: number;
     maxLoopDepth?: number;
-    fallbackModel?: string;
+    fallbackModel?: string | null;
+    fallbackMaxContextTokens?: number;
   });
   calculateTurnCostUsd(
     modelId: string,
@@ -79,6 +81,9 @@ export class CostKillSwitchMiddleware {
     modelId?: string;
     promptTokens?: number;
     projectedCompletionTokens?: number;
+    cachedPromptTokens?: number;
+    turnMode?: 'write' | 'read_only';
+    fallbackMaxContextTokens?: number;
   }): KruschEnvelope;
   recordTurnSpend(params: {
     taskId?: string;

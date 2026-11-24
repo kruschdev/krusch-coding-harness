@@ -11,13 +11,18 @@ import { KruschTelemetry } from '../brain/telemetry.js';
 /** Default per-task hard ceiling in USD ($0.50). */
 export const DEFAULT_HARD_LIMIT_USD = 0.50;
 
-/** Default $0.00 sovereign local fallback model. */
-export const DEFAULT_FALLBACK_MODEL = 'qwen2.5-coder:7b';
+/** Default $0.00 sovereign local fallback model (1st Chair, 32K ctx). */
+export const DEFAULT_FALLBACK_MODEL = 'inkling-2-mini:ud-iq4_xs-dspark';
+
+/** Default context ceiling (tokens) for local fallback turns. */
+export const DEFAULT_FALLBACK_MAX_CONTEXT_TOKENS = 32768;
 
 /** Sovereign local / mock models guaranteed to incur $0.00 API spend. */
 export const LOCAL_ZERO_COST_MODELS = Object.freeze([
-  'qwen2.5-coder:7b',
+  'inkling-2-mini:ud-iq4_xs-dspark',
   'qwen3-coder-30b-moe:latest',
+  'gemma4:e2b',
+  'qwen2.5-coder:7b',
   'gemma4:e4b',
   'hermes3:latest',
   'gpt-oss:120b',
@@ -47,13 +52,15 @@ export class CostKillSwitchMiddleware {
    * @param {number} [options.hardLimitUsd=DEFAULT_HARD_LIMIT_USD] - Hard USD ceiling per task
    * @param {number} [options.softFallbackRatio=0.80] - Fraction of hardLimitUsd triggering local fallback
    * @param {number} [options.maxLoopDepth=12] - Maximum turns allowed per task before halting
-   * @param {string} [options.fallbackModel=DEFAULT_FALLBACK_MODEL] - Local $0.00 model ID
+   * @param {string|null} [options.fallbackModel=DEFAULT_FALLBACK_MODEL] - Local $0.00 model ID (or null to always halt)
+   * @param {number} [options.fallbackMaxContextTokens=DEFAULT_FALLBACK_MAX_CONTEXT_TOKENS] - Max total tokens permitted for local fallback
    */
   constructor({
     hardLimitUsd = DEFAULT_HARD_LIMIT_USD,
     softFallbackRatio = 0.80,
     maxLoopDepth = 12,
-    fallbackModel = DEFAULT_FALLBACK_MODEL
+    fallbackModel = DEFAULT_FALLBACK_MODEL,
+    fallbackMaxContextTokens = DEFAULT_FALLBACK_MAX_CONTEXT_TOKENS
   } = {}) {
     if (!Number.isFinite(hardLimitUsd) || hardLimitUsd <= 0) {
       throw new RangeError('hardLimitUsd must be a positive finite number.');
@@ -64,14 +71,18 @@ export class CostKillSwitchMiddleware {
     if (!Number.isInteger(maxLoopDepth) || maxLoopDepth < 1) {
       throw new RangeError('maxLoopDepth must be a positive integer.');
     }
-    if (typeof fallbackModel !== 'string' || fallbackModel.trim().length === 0) {
-      throw new TypeError('fallbackModel must be a non-empty string.');
+    if (fallbackModel !== null && (typeof fallbackModel !== 'string' || fallbackModel.trim().length === 0)) {
+      throw new TypeError('fallbackModel must be a non-empty string or null.');
+    }
+    if (!Number.isInteger(fallbackMaxContextTokens) || fallbackMaxContextTokens < 1) {
+      throw new RangeError('fallbackMaxContextTokens must be a positive integer.');
     }
 
     this.hardLimitUsd = hardLimitUsd;
     this.softFallbackRatio = softFallbackRatio;
     this.maxLoopDepth = maxLoopDepth;
-    this.fallbackModel = fallbackModel.trim();
+    this.fallbackModel = fallbackModel === null ? null : fallbackModel.trim();
+    this.fallbackMaxContextTokens = fallbackMaxContextTokens;
     this.ledgers = new Map();
   }
 
@@ -108,10 +119,12 @@ export class CostKillSwitchMiddleware {
   calculateTurnCostUsd(modelId, promptTokens = 0, completionTokens = 0, cachedPromptTokens = 0) {
     if (!modelId || typeof modelId !== 'string') return 0;
     const normalized = modelId.trim();
+    const lowered = normalized.toLowerCase();
     if (
       LOCAL_ZERO_COST_MODELS.includes(normalized) ||
-      normalized.startsWith('ollama/') ||
-      normalized.startsWith('local/')
+      lowered.startsWith('ollama/') ||
+      lowered.startsWith('local/') ||
+      lowered.startsWith('inkling')
     ) {
       return 0;
     }
@@ -146,6 +159,8 @@ export class CostKillSwitchMiddleware {
    * @param {number} [params.promptTokens=1000] - Estimated prompt token count
    * @param {number} [params.projectedCompletionTokens=2048] - Projected completion token count
    * @param {number} [params.cachedPromptTokens=0] - Cached prompt token count
+   * @param {'write'|'read_only'} [params.turnMode='write'] - Turn mutability; write turns halt and report near cap instead of downgrading
+   * @param {number} [params.fallbackMaxContextTokens=this.fallbackMaxContextTokens] - Context token ceiling for local fallback
    * @returns {{ ok: boolean, tool: string, summary: string, data: object }}
    */
   evaluatePreTurn({
@@ -153,11 +168,21 @@ export class CostKillSwitchMiddleware {
     modelId = 'gemini-4-argon',
     promptTokens = 1000,
     projectedCompletionTokens = 2048,
-    cachedPromptTokens = 0
+    cachedPromptTokens = 0,
+    turnMode = 'write',
+    fallbackMaxContextTokens = this.fallbackMaxContextTokens
   } = {}) {
     const ledger = this._ensureLedger(taskId);
     const nextDepth = ledger.loopDepth + 1;
     const spentUsd = Number(ledger.spentUsd.toFixed(6));
+    const normalizedTurnMode =
+      String(turnMode || 'write').trim().toLowerCase() === 'read_only' ? 'read_only' : 'write';
+    const maxFallbackCtx = Math.max(
+      1,
+      Math.floor(Number(fallbackMaxContextTokens) || this.fallbackMaxContextTokens)
+    );
+    const projectedTotalTokens =
+      Math.max(0, Number(promptTokens) || 0) + Math.max(0, Number(projectedCompletionTokens) || 0);
 
     if (nextDepth > this.maxLoopDepth) {
       const reason = `Loop depth ${nextDepth} exceeds maxLoopDepth (${this.maxLoopDepth}).`;
@@ -170,6 +195,7 @@ export class CostKillSwitchMiddleware {
           status: 'HALTED_LOOP_DEPTH',
           effectiveModel: null,
           originalModel: modelId,
+          turnMode: normalizedTurnMode,
           loopDepth: nextDepth,
           spentUsd,
           projectedTurnUsd: 0,
@@ -191,6 +217,7 @@ export class CostKillSwitchMiddleware {
           status: 'HALTED_BUDGET_EXCEEDED',
           effectiveModel: null,
           originalModel: modelId,
+          turnMode: normalizedTurnMode,
           loopDepth: nextDepth,
           spentUsd,
           projectedTurnUsd: 0,
@@ -214,6 +241,77 @@ export class CostKillSwitchMiddleware {
       projectedTurnUsd > 0 &&
       (candidateTotalUsd > this.hardLimitUsd || candidateTotalUsd >= softThresholdUsd)
     ) {
+      if (normalizedTurnMode !== 'read_only') {
+        const reason = `Projected total $${candidateTotalUsd.toFixed(6)} crossed budget threshold on mutating write turn; halting and reporting instead of downgrading ${modelId}.`;
+        return {
+          ok: false,
+          tool: 'krusch_cost_killswitch',
+          summary: `Halted write turn for task ${ledger.taskId}: ${reason}`,
+          data: {
+            allowed: false,
+            status: 'HALTED_BUDGET_EXCEEDED',
+            reasonCode: 'WRITE_TURN_HALT_AND_REPORT',
+            effectiveModel: null,
+            originalModel: modelId,
+            turnMode: normalizedTurnMode,
+            loopDepth: nextDepth,
+            spentUsd,
+            projectedTurnUsd,
+            projectedTotalUsd: candidateTotalUsd,
+            hardLimitUsd: this.hardLimitUsd,
+            reason
+          }
+        };
+      }
+
+      if (projectedTotalTokens > maxFallbackCtx) {
+        const reason = `Projected context ${projectedTotalTokens} tokens exceeds local fallback ceiling (${maxFallbackCtx}); halting and reporting instead of truncating.`;
+        return {
+          ok: false,
+          tool: 'krusch_cost_killswitch',
+          summary: `Halted oversized read-only turn for task ${ledger.taskId}: ${reason}`,
+          data: {
+            allowed: false,
+            status: 'HALTED_BUDGET_EXCEEDED',
+            reasonCode: 'FALLBACK_CONTEXT_WINDOW_EXCEEDED',
+            effectiveModel: null,
+            originalModel: modelId,
+            turnMode: normalizedTurnMode,
+            projectedTotalTokens,
+            fallbackMaxContextTokens: maxFallbackCtx,
+            loopDepth: nextDepth,
+            spentUsd,
+            projectedTurnUsd,
+            projectedTotalUsd: candidateTotalUsd,
+            hardLimitUsd: this.hardLimitUsd,
+            reason
+          }
+        };
+      }
+
+      if (!this.fallbackModel) {
+        const reason = `Projected total $${candidateTotalUsd.toFixed(6)} crossed budget threshold with no fallbackModel configured.`;
+        return {
+          ok: false,
+          tool: 'krusch_cost_killswitch',
+          summary: `Halted task ${ledger.taskId}: ${reason}`,
+          data: {
+            allowed: false,
+            status: 'HALTED_BUDGET_EXCEEDED',
+            reasonCode: 'NO_FALLBACK_CONFIGURED',
+            effectiveModel: null,
+            originalModel: modelId,
+            turnMode: normalizedTurnMode,
+            loopDepth: nextDepth,
+            spentUsd,
+            projectedTurnUsd,
+            projectedTotalUsd: candidateTotalUsd,
+            hardLimitUsd: this.hardLimitUsd,
+            reason
+          }
+        };
+      }
+
       ledger.loopDepth = nextDepth;
       const fallbackTurnCostUsd = this.calculateTurnCostUsd(
         this.fallbackModel,
@@ -224,8 +322,8 @@ export class CostKillSwitchMiddleware {
       const projectedTotalUsd = Number((spentUsd + fallbackTurnCostUsd).toFixed(6));
       const reason =
         candidateTotalUsd > this.hardLimitUsd
-          ? `Projected total $${candidateTotalUsd.toFixed(6)} exceeds hard limit $${this.hardLimitUsd.toFixed(2)}; rerouting to sovereign $0.00 fallback ${this.fallbackModel}.`
-          : `Projected total $${candidateTotalUsd.toFixed(6)} reached soft threshold $${softThresholdUsd.toFixed(2)}; rerouting to sovereign $0.00 fallback ${this.fallbackModel}.`;
+          ? `Projected total $${candidateTotalUsd.toFixed(6)} exceeds hard limit $${this.hardLimitUsd.toFixed(2)} on read-only turn; rerouting to sovereign $0.00 fallback ${this.fallbackModel}.`
+          : `Projected total $${candidateTotalUsd.toFixed(6)} reached soft threshold $${softThresholdUsd.toFixed(2)} on read-only turn; rerouting to sovereign $0.00 fallback ${this.fallbackModel}.`;
 
       return {
         ok: true,
@@ -236,6 +334,9 @@ export class CostKillSwitchMiddleware {
           status: 'FALLBACK_MODEL',
           effectiveModel: this.fallbackModel,
           originalModel: modelId,
+          turnMode: normalizedTurnMode,
+          projectedTotalTokens,
+          fallbackMaxContextTokens: maxFallbackCtx,
           loopDepth: nextDepth,
           spentUsd,
           projectedTurnUsd,
@@ -256,6 +357,7 @@ export class CostKillSwitchMiddleware {
         status: 'PROCEED',
         effectiveModel: modelId,
         originalModel: modelId,
+        turnMode: normalizedTurnMode,
         loopDepth: nextDepth,
         spentUsd,
         projectedTurnUsd,

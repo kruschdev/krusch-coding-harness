@@ -210,14 +210,17 @@ describe('Production Agentic Systems (#7 HITL, #8 Golden DAG CI, #12 Cost Kill-S
     assert.ok(drifted.violations.length > 0);
   });
 
-  it('#12 CostKillSwitchMiddleware downgrades frontier models before $0.50 and halts on budget/depth breach', () => {
+  it('#12 CostKillSwitchMiddleware halts write turns near $0.50, downgrades bounded read_only turns to Inkling, and halts on context/budget/depth breach', () => {
     assert.equal(DEFAULT_HARD_LIMIT_USD, 0.50);
     const guard = new CostKillSwitchMiddleware({
       hardLimitUsd: 0.50,
       softFallbackRatio: 0.80,
-      maxLoopDepth: 4,
-      fallbackModel: 'qwen2.5-coder:7b',
+      maxLoopDepth: 6,
     });
+
+    // Verify 1st-Chair Inkling and 3rd-Chair Gemma4 e2b are recognized as $0.00 local models
+    assert.equal(guard.calculateTurnCostUsd('inkling-2-mini:ud-iq4_xs-dspark', 16_000, 4_000), 0);
+    assert.equal(guard.calculateTurnCostUsd('gemma4:e2b', 8_000, 2_000), 0);
 
     // Turn 1: Well below $0.50 -> PROCEED
     const t1 = guard.evaluatePreTurn({
@@ -230,24 +233,51 @@ describe('Production Agentic Systems (#7 HITL, #8 Golden DAG CI, #12 Cost Kill-S
     assert.equal(t1.data.status, 'PROCEED');
     assert.equal(t1.data.effectiveModel, 'openai/gpt-5');
 
-    // Record $0.42 spend -> next paid turn projects > $0.50 -> FALLBACK_MODEL to $0.00 local Ollama
+    // Record $0.42 spend -> next paid mutating write turn MUST halt and report (no silent downgrade)
     guard.recordTurnSpend({
       taskId: 'runaway-1',
       modelId: 'openai/gpt-5',
       promptTokens: 21_000,
       completionTokens: 7_000,
     });
-    const t2 = guard.evaluatePreTurn({
+    const tWriteHalt = guard.evaluatePreTurn({
       taskId: 'runaway-1',
       modelId: 'openai/gpt-5',
       promptTokens: 10_000,
       projectedCompletionTokens: 4_000,
     });
+    assert.equal(tWriteHalt.ok, false);
+    assert.equal(tWriteHalt.data.allowed, false);
+    assert.equal(tWriteHalt.data.status, 'HALTED_BUDGET_EXCEEDED');
+    assert.equal(tWriteHalt.data.reasonCode, 'WRITE_TURN_HALT_AND_REPORT');
+    assert.equal(tWriteHalt.data.effectiveModel, null);
+
+    // Bounded read_only wrap-up turn -> FALLBACK_MODEL to $0.00 1st-Chair Inkling
+    const t2 = guard.evaluatePreTurn({
+      taskId: 'runaway-1',
+      modelId: 'openai/gpt-5',
+      promptTokens: 10_000,
+      projectedCompletionTokens: 4_000,
+      turnMode: 'read_only',
+    });
     assert.equal(t2.ok, true);
     assert.equal(t2.data.status, 'FALLBACK_MODEL');
-    assert.equal(t2.data.effectiveModel, 'qwen2.5-coder:7b');
+    assert.equal(t2.data.effectiveModel, 'inkling-2-mini:ud-iq4_xs-dspark');
+    assert.equal(t2.data.projectedTotalUsd, t2.data.spentUsd);
 
-    // Push cumulative spend >= $0.50 -> hard kill switch trips immediately
+    // Oversized read_only turn (>32K ctx) -> halts instead of silently truncating
+    const tOversized = guard.evaluatePreTurn({
+      taskId: 'runaway-1',
+      modelId: 'openai/gpt-5',
+      promptTokens: 31_000,
+      projectedCompletionTokens: 4_000,
+      turnMode: 'read_only',
+    });
+    assert.equal(tOversized.ok, false);
+    assert.equal(tOversized.data.status, 'HALTED_BUDGET_EXCEEDED');
+    assert.equal(tOversized.data.reasonCode, 'FALLBACK_CONTEXT_WINDOW_EXCEEDED');
+
+    // Push cumulative spend >= $0.50 -> hard kill switch trips immediately even for read_only
     guard.recordTurnSpend({
       taskId: 'runaway-1',
       modelId: 'openai/gpt-5',
@@ -259,6 +289,7 @@ describe('Production Agentic Systems (#7 HITL, #8 Golden DAG CI, #12 Cost Kill-S
       modelId: 'openai/gpt-5',
       promptTokens: 1_000,
       projectedCompletionTokens: 500,
+      turnMode: 'read_only',
     });
     assert.equal(t3.ok, false);
     assert.equal(t3.data.allowed, false);
